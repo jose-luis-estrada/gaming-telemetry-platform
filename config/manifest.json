@@ -1,0 +1,11 @@
+{
+  "seed": 42,
+  "rows": 100,
+  "defects": {
+    "skew": {
+      "hot_game_id": 1,
+      "hot_game_probability": 0.37,
+      "tolerance": 0.02
+    }
+  }
+}
