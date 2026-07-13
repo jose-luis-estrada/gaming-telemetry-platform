@@ -115,3 +115,10 @@ format, defect seeding. Repo structure defined: `src/generator/`, `notebooks/`,
   - Defects grouped under `defects`
   - `skew` includes `hot_game_id`, `hot_game_probability`, and `tolerance`
 - Decided that `manifest.json` is version-controlled under `config/`, while generated datasets remain under `data/`, which is intentionally ignored by Git.
+
+### 2026-07-13
+Closed event_timestamp: uniform draw over a semi-open [start, start+30d) window,
+tz-aware UTC, offset in seconds for intraday resolution. Drawn last in the rng
+stream to keep the prior columns bit-identical. Flat by design: skew lives on the
+game_id axis, not the time axis, so event_date partitions stay balanced and the
+W5 straggler reads cleanly. Acceptance query in Inspect.
