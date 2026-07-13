@@ -31,6 +31,7 @@ manifest = json.loads(MANIFEST_PATH.read_text())
 seed = manifest["seed"]
 n_rows = manifest["rows"]
 skew = manifest["defects"]["skew"]
+window = manifest["event_window"]
 
 # ----------------------------
 # RNG
