@@ -80,6 +80,11 @@ weights = build_weights(
     tolerance=skew["tolerance"]
 )
 
+# start_utc carries the Z, so this Timestamp is tz-aware UTC and every
+# event_timestamp inherits it. One clock, declared, not implicit. DDIA Ch 8.
+start = pd.Timestamp(window["start_utc"])
+window_seconds = window["days"] * 86_400
+
 events = pd.DataFrame({
     # Sequential ints: reproducible event_id across runs.
     "event_id": range(1, n_rows + 1),
@@ -90,14 +95,21 @@ events = pd.DataFrame({
         ["login", "logout", "purchase", "match_start", "match_end"],
         size=n_rows
     ),
-    "event_timestamp": pd.date_range(start="2026-01-01", periods=n_rows, freq="min")
+    # Drawn LAST so player_id/game_id/event_type keep the same rng stream and
+    # stay bit-identical. rng.integers excludes the high, i.e. a semi-open
+    # window [start, start+30d). Jan 31 never appears.
+    "event_timestamp": start + pd.to_timedelta(rng.integers(
+        0, window_seconds, size=n_rows), unit="s")
 })
 
 # ----------------------------
 # Inspect
 # ----------------------------
 
-print(events)
-print(events.dtypes)
-print(events["game_id"].value_counts(normalize=True))
+# W1 exit criterion: every timestamp lands inside the semi-open window.
+in_window = (events["event_timestamp"] >= start) & (
+    events["event_timestamp"] < start + pd.Timedelta(days=window["days"])
+)
+print("in window:", in_window.all())
+print("distinct dates:", events["event_timestamp"].dt.date.nunique())
 # %%
