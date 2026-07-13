@@ -6,11 +6,26 @@ import pandas as pd
 import numpy as np
 
 # ----------------------------
+# Repo root
+# ----------------------------
+def find_repo_root(marker="config"):
+    # __file__ does not exist in # %% cells, so we cannot anchor to the source
+    # file. Walk up from CWD until we hit the directory that owns the marker.
+    path = Path.cwd()
+    for candidate in [path, *path.parents]:
+        if (candidate / marker).is_dir():
+            return candidate
+    # Fail loud: a missing root is a broken checkout, not something to guess at.
+    raise FileNotFoundError(f"repo root not found: no '{marker}' dir above {Path.cwd()}")
+
+REPO_ROOT = find_repo_root()
+
+# ----------------------------
 # Load manifest
 # ----------------------------
 # The manifest is the spec: written before generation, single source of truth.
 # The generator reads from it and holds no distribution numbers of its own.
-MANIFEST_PATH = Path("config/manifest.json") # assumes CWD is the repo root
+MANIFEST_PATH = REPO_ROOT / "config" / "manifest.json"  # absolute, CWD-independent
 manifest = json.loads(MANIFEST_PATH.read_text())
 
 seed = manifest["seed"]
