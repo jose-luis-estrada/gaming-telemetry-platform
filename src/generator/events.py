@@ -103,13 +103,34 @@ events = pd.DataFrame({
 })
 
 # ----------------------------
+# Late arrivals
+# ----------------------------
+# ingestion_timestamp is when the event landed in the platform, separate from
+# event_timestamp (when it happend). Event time vs processing time, DDIA Ch 11.
+# Drawn AFTER the DataFrame so the earlier columns keep their rng stream.
+late = manifest["defects"]["late_arrivals"]
+normal_max = late["normal_max_delay_seconds"]
+max_late_s = late["max_lateness_hours"] * 3600
+
+is_late = rng.random(n_rows) < late["late_fraction"]
+normal_delay = rng.integers(0, normal_max, size=n_rows)
+# Late delays start where normal ends, so a single threshold separates the two
+# populations with no overlap and the late fraction stays verificable.
+late_delay = rng.integers(normal_max, max_late_s, size=n_rows)
+delay_seconds = np.where(is_late, late_delay, normal_delay)
+
+# event_timestamp still drives the partition, not this. A late event lands in a
+# partition whose event_date already passed. That is the whole defect.
+events["ingestion_timestamp"] = events["event_timestamp"] + pd.to_timedelta(
+    delay_seconds, unit="s"
+)
+
+# ----------------------------
 # Inspect
 # ----------------------------
 
-# W1 exit criterion: every timestamp lands inside the semi-open window.
-in_window = (events["event_timestamp"] >= start) & (
-    events["event_timestamp"] < start + pd.Timedelta(days=window["days"])
-)
-print("in window:", in_window.all())
-print("distinct dates:", events["event_timestamp"].dt.date.nunique())
+# W1 exit criterion: late fraction and max lateness match the manifest.
+delay = (events["ingestion_timestamp"] - events["event_timestamp"]).dt.total_seconds()
+print("late rate:", (delay >= normal_max).mean())
+print("max lateness hours:", delay.max() / 3600)
 # %%
