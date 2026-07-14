@@ -122,3 +122,13 @@ tz-aware UTC, offset in seconds for intraday resolution. Drawn last in the rng
 stream to keep the prior columns bit-identical. Flat by design: skew lives on the
 game_id axis, not the time axis, so event_date partitions stay balanced and the
 W5 straggler reads cleanly. Acceptance query in Inspect.
+
+### 2026-07-14
+Closed late arrivals. New ingestion_timestamp column, separate from
+event_timestamp: event time vs processing time, DDIA Ch 11. event_timestamp
+still drives the partition, so late events land in an already-closed event_date.
+Delay is a mixture: normal uniform [0, 300s), late uniform [300s, 72h). Late
+population starts where normal ends so a single threshold separates them and the
+late fraction is verifiable against the manifest, not approximate. Uniform over
+exponential: the 72h bound is the invariant the watermark depends on, the shape
+is a one-line knob.
