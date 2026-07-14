@@ -84,6 +84,8 @@ weights = build_weights(
 # event_timestamp inherits it. One clock, declared, not implicit. DDIA Ch 8.
 start = pd.Timestamp(window["start_utc"])
 window_seconds = window["days"] * 86_400
+# Shared by the base event_type draw and the correction-duplicate redraw.
+event_types = ["login", "logout", "purchase", "match_start", "match_end"]
 
 events = pd.DataFrame({
     # Sequential ints: reproducible event_id across runs.
@@ -91,10 +93,7 @@ events = pd.DataFrame({
     "player_id": rng.integers(1, 20, size=n_rows),
     # Skew lives in the key distribution, driven by the manifest weights.
     "game_id": rng.choice(skew["game_ids"], size=n_rows, p=weights),
-    "event_type": rng.choice(
-        ["login", "logout", "purchase", "match_start", "match_end"],
-        size=n_rows
-    ),
+    "event_type": rng.choice(event_types, size=n_rows),
     # Drawn LAST so player_id/game_id/event_type keep the same rng stream and
     # stay bit-identical. rng.integers excludes the high, i.e. a semi-open
     # window [start, start+30d). Jan 31 never appears.
@@ -106,7 +105,7 @@ events = pd.DataFrame({
 # Late arrivals
 # ----------------------------
 # ingestion_timestamp is when the event landed in the platform, separate from
-# event_timestamp (when it happend). Event time vs processing time, DDIA Ch 11.
+# event_timestamp (when it happened). Event time vs processing time, DDIA Ch 11.
 # Drawn AFTER the DataFrame so the earlier columns keep their rng stream.
 late = manifest["defects"]["late_arrivals"]
 normal_max = late["normal_max_delay_seconds"]
@@ -115,7 +114,7 @@ max_late_s = late["max_lateness_hours"] * 3600
 is_late = rng.random(n_rows) < late["late_fraction"]
 normal_delay = rng.integers(0, normal_max, size=n_rows)
 # Late delays start where normal ends, so a single threshold separates the two
-# populations with no overlap and the late fraction stays verificable.
+# populations with no overlap and the late fraction stays verifiable.
 late_delay = rng.integers(normal_max, max_late_s, size=n_rows)
 delay_seconds = np.where(is_late, late_delay, normal_delay)
 
@@ -126,11 +125,51 @@ events["ingestion_timestamp"] = events["event_timestamp"] + pd.to_timedelta(
 )
 
 # ----------------------------
+# Producer identity
+# ----------------------------
+# Every event carries its producer and that producer's own monotonic sequence.
+# This pair, not the wall clock, is the dedup ordering key: 3 producers, 3
+# clocks. DDIA Ch 8. producer_id is reused later by the small-files defect.
+producer_id = rng.integers(1, 4, size=n_rows) # producers 1..3
+events["producer_id"] = producer_id
+# per-producer counter in emission (row) order
+events["source_sequence_number"] = (
+    pd.Series(producer_id).groupby(producer_id).cumcount().to_numpy()
+)
+
+# ----------------------------
+# Duplicates
+# ----------------------------
+dup = manifest["defects"]["duplicates"]
+n_dup = int(n_rows * dup["duplicate_fraction"])
+dup_idx = rng.choice(n_rows, size=n_dup, replace=False)
+dups = events.iloc[dup_idx].copy()
+
+# Tail of the duplicate set are corrections: same event_id, redrawn payload, and
+# a strictly higher sequence so dedup keeps the correction over the original.
+n_identical = int(n_dup * dup["byte_identical_ratio"])
+is_correction = np.arange(n_dup) >= n_identical
+if is_correction.sum() > 0:
+    dups.loc[is_correction, "event_type"] = rng.choice(
+        event_types, size=int(is_correction.sum())
+    )
+    dups.loc[is_correction, "source_sequence_number"] += 1_000_000
+
+# A few duplicates land past the 3-day dedup window, so they survive dedup on
+# purpose. This is what makes the bounded guarantee visible, not theoretical.
+escape = np.arange(n_dup)[: dup ["out_of_window_count"]]
+col = dups.columns.get_loc("ingestion_timestamp")
+dups.iloc[escape, col] = dups.iloc[escape, col] + pd.Timedelta(
+    hours=dup["dedup_window_hours"]
+) + pd.Timedelta(hours=1)
+
+events = pd.concat([events, dups], ignore_index=True)
+
+# ----------------------------
 # Inspect
 # ----------------------------
 
-# W1 exit criterion: late fraction and max lateness match the manifest.
-delay = (events["ingestion_timestamp"] - events["event_timestamp"]).dt.total_seconds()
-print("late rate:", (delay >= normal_max).mean())
-print("max lateness hours:", delay.max() / 3600)
+# W1 exit criterion: duplicate rate matches manifest, identities are not invented.
+print("dup rate:", events["event_id"].duplicated().mean())
+print("distinct event_ids:", events["event_id"].nunique())
 # %%
