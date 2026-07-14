@@ -12,6 +12,12 @@
       "hot_game_id": 1,
       "hot_game_probability": 0.37,
       "tolerance": 0.02
+    },
+    "late_arrivals": {
+      "late_fraction": 0.025,
+      "max_lateness_hours": 72,
+      "normal_max_delay_seconds": 300,
+      "tolerance": 0.005
     }
   }
 }
