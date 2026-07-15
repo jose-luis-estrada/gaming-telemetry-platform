@@ -168,6 +168,74 @@ after = (
 events["metadata"] = np.where(is_new_schema, after, before)
 
 # ----------------------------
+# Crashes: text in-table, binary out-of-table
+# ----------------------------
+# A crash carries a free-text stack trace and a screenshot. The trace stays in
+# the table: semi-structured, but column pruning means you never pay to read it
+# unless you select it. The screenshot is binary and goes to a Volume-like dir;
+# the table holds only a reference (path, size, content type, hash). Keep the
+# blob out of the row, keep a pointer in the row.
+crash = manifest["defects"]["crashes"]
+
+is_crash = rng.random(len(events)) < crash["crash_fraction"]
+# Only a subset of crashes capture a screenshot. Realistic, and it bounds the
+# binary volume independent of row count.
+has_shot = is_crash & (rng.random(len(events)) < crash["screenshot_fraction"])
+
+exceptions = ["NullPointerException", "TimeoutException", "OutOfMemoryError"]
+
+def make_trace(exc_name):
+    # Synthetic multi-line trace: enough shape to be semi-structured, not real.
+    # The point is the storage decision, not the payload.
+    return (
+        f"{exc_name}: game loop stalled\n"
+        f"  at engine.render.Frame.draw(Frame.java:812)\n"
+        f"  at engine.core.Loop.tick(Loop.java:144)\n"
+        f"  at engine.core.Main.run(Main.java:57)"
+    )
+
+# Build traces only where a crash happened; null for the 99%+ that never crashed.
+events["stack_trace"] = None
+crash_pos = np.flatnonzero(is_crash)
+# A crash is its own event type: keep event_type and stack_trace consistent.
+events.loc[crash_pos, "event_type"] = "crash"
+crash_exc = rng.choice(exceptions, size=crash_pos.size)
+events.loc[crash_pos, "stack_trace"] = [make_trace(e) for e in crash_exc]
+
+# Screenshot binaries land in a Volume-like dir, referenced by content hash.
+shots_dir = REPO_ROOT / "data" / "screenshots"
+if shots_dir.exists():
+    shutil.rmtree(shots_dir)
+shots_dir.mkdir(parents=True, exist_ok=True)
+
+# Reference columns default to null: no screenshot means no pointer. bytes is a
+# nullable Int64 so parquet gets a real integer column, not object.
+events["screenshot_path"] = None
+events["screenshot_bytes"] = pd.array([pd.NA] * len(events), dtype="Int64")
+events["screenshot_content_type"] = None
+events["screenshot_sha256"] = None
+
+shot_pos = np.flatnonzero(has_shot)
+sizes = rng.integers(
+    crash["screenshot_min_bytes"], crash["screenshot_max_bytes"], size=shot_pos.size
+)
+paths, byts, ctypes, digests = [], [], [], []
+for size in sizes:
+    # Deterministic bytes from the rng so the dataset stays bit-identical by seed.
+    blob = rng.bytes(int(size))
+    digest = hashlib.sha256(blob).hexdigest()
+    (shots_dir / f"{digest}.png").write_bytes(blob)
+    paths.append(f"screenshots/{digest}.png")
+    byts.append(int(size))
+    ctypes.append("image/png")
+    digests.append(digest)
+
+events.loc[shot_pos, "screenshot_path"] = paths
+events.loc[shot_pos, "screenshot_bytes"] = byts
+events.loc[shot_pos, "screenshot_content_type"] = ctypes
+events.loc[shot_pos, "screenshot_sha256"] = digests
+
+# ----------------------------
 # Duplicates
 # ----------------------------
 dup = manifest["defects"]["duplicates"]
@@ -239,7 +307,13 @@ print("files written:", n_files)
 # Inspect
 # ----------------------------
 
-# W1 exit criterion: the small-files defect is measurable, not asserted.
-sizes = [p.stat().st_size for p in out.rglob("*.parquet")]
-print("files:", len(sizes), "mean KB:", round(sum(sizes) / len(sizes) / 1024, 1))
+# W1 exit criterion: crashes split across text in-table and binary out-of-table.
+# Rows referencing a screenshot exceed files on disk: duplicate crashes point at
+# the same blob, one file, many references. That is the reference pattern.
+n_crash = events["stack_trace"].notna().sum()
+n_shot_rows = events["screenshot_path"].notna().sum()
+n_shot_files = len(list((REPO_ROOT / "data" / "screenshots").glob("*.png")))
+print("crash rows (stack_trace in-table):", int(n_crash))
+print("rows referencing a screenshot:", int(n_shot_rows))
+print("screenshot files on disk:", n_shot_files)
 # %%
