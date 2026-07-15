@@ -195,13 +195,50 @@ dups.iloc[escape, col] = dups.iloc[escape, col] + pd.Timedelta(
 events = pd.concat([events, dups], ignore_index=True)
 
 # ----------------------------
+# Write files
+# ----------------------------
+# event_date (from event_timestamp) is the PARTITION directory, single level.
+# The file split WITHIN a partition is one producer's flush window, keyed on
+# ingestion_timestamp: partition = event time, file = processing time. A late
+# event lands in an old event_date directory via a new flush. DDIA Ch 11.
+small = manifest["defects"]["small_files"]
+flush = f"{small['flush_minutes']}min"
+
+events["event_date"] = events["event_timestamp"].dt.strftime("%Y-%m-%d")
+# Floor the producer's wall clock to the flush cadence: every event a producer
+# received in the same 5-minute window flushes together into one file.
+events["flush_window"] = events["ingestion_timestamp"].dt.floor(flush)
+
+out = REPO_ROOT / "data" / "landing"
+# Clean stale runs so file counts stay verifiable against the manifest.
+if out.exists():
+    shutil.rmtree(out)
+
+n_files = 0
+# One file per (event_date, producer, flush window): 3 producers x 288 windows
+# x 30 days ~ 25,920 tiny files. Deliberately bad. Compaction is a W3 platform
+# capability, not the producer's job.
+for (event_date, producer_id, flush_window), group in events.groupby(
+    ["event_date", "producer_id", "flush_window"], sort=False
+):
+    part_dir = out / f"event_date={event_date}"  # single-level Hive partition
+    part_dir.mkdir(parents=True, exist_ok=True)
+    stamp = flush_window.strftime("%Y%m%dT%H%M")
+    fname = f"part-p{producer_id}-{stamp}.parquet"
+    # Drop the two bookkeeping columns: event_date is implied by the directory,
+    # flush_window was only ever a grouping key, not part of the event schema.
+    group.drop(columns=["event_date", "flush_window"]).to_parquet(
+        part_dir / fname, index=False
+    )
+    n_files += 1
+
+print("files written:", n_files)
+
+# ----------------------------
 # Inspect
 # ----------------------------
 
-# W1 exit criterion: drift verifiable against the manifest with one query.
-# The new key must appear iff the event happened on or after drift_day.
-has_key = events["metadata"].str.contains(drift["new_key"])
-before_day = events["event_timestamp"] < drift_start
-print("new key before drift_day (must be 0):", int((has_key & before_day).sum()))
-print("new key overall rate:", round(has_key.mean(), 3))
+# W1 exit criterion: the small-files defect is measurable, not asserted.
+sizes = [p.stat().st_size for p in out.rglob("*.parquet")]
+print("files:", len(sizes), "mean KB:", round(sum(sizes) / len(sizes) / 1024, 1))
 # %%
