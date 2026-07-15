@@ -49,6 +49,19 @@ Closed. Do not reopen without a written reason in the Log.
 - **Duplicates are seeded in two flavors.** Byte-identical retries, and
   same-key-different-payload. A few land outside the 3-day window on purpose,
   to make the bounded guarantee visible instead of theoretical.
+- **Schema drift: a JSON metadata key gated on event_timestamp.** `metadata` is a
+  raw JSON string in landing; drift is a KEY (`network_type`) appearing inside the
+  blob from day 15 on, not a new table column. Gated on event_timestamp, not
+  ingestion, so the boundary is clean in partition space and one query verifies it
+  (new key before drift_day must be 0). Global flip across producers for
+  verifiability; staggered is a one-line manifest change. Physical-column drift is
+  a write-step variant, parked.
+- **Landing file layout: partition on event time, split file on processing time.**
+  `event_date=YYYY-MM-DD/` directory from event_timestamp; within it one file per
+  (producer_id, 5-min flush window), flush window keyed on ingestion_timestamp.
+  Producer and flush live in the filename, not the path, so the partition stays
+  single-level. A late event lands in an old event_date directory via a new flush.
+  DDIA Ch 11.
 
 ## Definition of done
 - [ ] `make pipeline` runs end to end from S3 to Gold, no manual intervention
@@ -60,7 +73,7 @@ Closed. Do not reopen without a written reason in the Log.
 
 ## Week 1 exit criteria
 - [ ] `make generate` produces 50M events, 30 days, 4-6 GB
-- [ ] `manifest.json` records exact ground truth for all 5 defects
+- [X] `manifest.json` records exact ground truth for all 5 defects
 - [ ] Each defect verifiable against the manifest with a single query
 - [ ] Same seed produces a bit-identical dataset
 - [ ] Crashes carry text stack traces in-table, binary screenshots out-of-table
@@ -78,10 +91,6 @@ Closed. Do not reopen without a written reason in the Log.
 ## Open decisions
 Things I have not settled yet.
 
-- Exact seeding mechanics for schema drift: which key appears, on which day
-- Exact seeding mechanics for late arrivals: shape of the delay distribution
-- How many duplicates land outside the 3-day window
-- Ratio of byte-identical duplicates to same-key-different-payload duplicates
 - Migrate the full game distribution (`[0.37, 0.21, 0.21, 0.21]`) and corresponding game ID list from hardcoded values in `events.py` into `manifest.json`.
 
 ## Parked
@@ -139,3 +148,22 @@ producers means 3 clocks. DDIA Ch 8. Two flavors seeded: byte-identical retries
 (0.7) and same-key-different-payload corrections that carry a strictly higher
 sequence so dedup keeps the correction. A handful (5) land past the 3-day window
 on purpose, so the bounded guarantee is visible, not theoretical.
+
+### 2026-07-15
+Closed schema drift. New metadata column: a raw JSON string, the way telemetry
+lands. Drift is a key (network_type) appearing inside the blob from day 15 on,
+gated on event_timestamp so the boundary is clean in partition space and one
+query verifies it. Global flip across producers. JSON string over physical
+column: pyarrow would union a struct schema and null the missing field, erasing
+the drift; raw JSON is also what the framework parses on read, giving the
+contract-violation story for W2-W3.
+
+Closed small files. Write step added. event_date directory from event_timestamp,
+single level; within it one file per (producer_id, 5-min flush window), flush
+window keyed on ingestion_timestamp. Partition = event time, file = processing
+time, DDIA Ch 11: a late event lands in an old event_date directory via a new
+flush, visible on disk. Producer and flush in the filename, not the path, so the
+partition stays single-level. File count is not exactly 25,920: at 50M nearly
+every cell fills but late arrivals open extra (event_date, flush_window) files in
+already-passed partitions and push it slightly above, plus the escaped
+duplicates; at test scale most cells are empty and it lands well below.
