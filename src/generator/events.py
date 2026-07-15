@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 import numpy as np
+import shutil
 
 # ----------------------------
 # Repo root
@@ -138,6 +139,34 @@ events["source_sequence_number"] = (
 )
 
 # ----------------------------
+# Metadata and schema drift
+# ----------------------------
+# metadata lands as a raw JSON string, the way telemetry actually arrives: the
+# platform stores the blob in Bronze and parses it on read. Drift here is a KEY
+# appearing INSIDE the blob, not a new table column. The framework's declared
+# per-source schema is the contract; a key it doesn't know about is the defect.
+drift = manifest["defects"]["schema_drift"]
+
+# Boundary keyed on event_timestamp, not ingestion_timestamp: a producer ships a
+# new client version at a wall-clock moment and every event it EMITS afterward
+# carries the new key. event_timestamp drives the partition, so the boundary is
+# clean in partition space and one query verifies it. DDIA Ch 11.
+drift_start = start + pd.Timedelta(days=drift["drift_day"])
+is_new_schema = events["event_timestamp"] >= drift_start
+
+device = pd.Series(rng.choice(drift["devices"], size=len(events)))
+network = pd.Series(rng.choice(drift["new_key_values"], size=len(events)))
+
+# Closed vocabulary (no quotes to escape), so we interpolate the JSON string
+# vectorized instead of paying a json.dumps call per row across 50M rows.
+before = '{"device": "' + device + '", "app_version": "' + drift["version_before"] + '"}'
+after = (
+    '{"device": "' + device + '", "app_version": "' + drift["version_after"]
+    + '", "' + drift["new_key"] + '": "' + network + '"}'
+)
+events["metadata"] = np.where(is_new_schema, after, before)
+
+# ----------------------------
 # Duplicates
 # ----------------------------
 dup = manifest["defects"]["duplicates"]
@@ -169,7 +198,10 @@ events = pd.concat([events, dups], ignore_index=True)
 # Inspect
 # ----------------------------
 
-# W1 exit criterion: duplicate rate matches manifest, identities are not invented.
-print("dup rate:", events["event_id"].duplicated().mean())
-print("distinct event_ids:", events["event_id"].nunique())
+# W1 exit criterion: drift verifiable against the manifest with one query.
+# The new key must appear iff the event happened on or after drift_day.
+has_key = events["metadata"].str.contains(drift["new_key"])
+before_day = events["event_timestamp"] < drift_start
+print("new key before drift_day (must be 0):", int((has_key & before_day).sum()))
+print("new key overall rate:", round(has_key.mean(), 3))
 # %%
