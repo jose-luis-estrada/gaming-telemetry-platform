@@ -35,6 +35,12 @@
     },
     "small_files": {
       "flush_minutes": 5
+    },
+    "crashes": {
+      "crash_fraction": 0.005,
+      "screenshot_fraction": 0.2,
+      "screenshot_min_bytes": 2048,
+      "screenshot_max_bytes": 8192
     }
   }
 }
