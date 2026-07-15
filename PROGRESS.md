@@ -132,3 +132,10 @@ population starts where normal ends so a single threshold separates them and the
 late fraction is verifiable against the manifest, not approximate. Uniform over
 exponential: the 72h bound is the invariant the watermark depends on, the shape
 is a one-line knob.
+
+Closed duplicates. New producer_id and source_sequence_number columns: the dedup
+ordering key is (producer_id, source_sequence_number), not wall-clock, because 3
+producers means 3 clocks. DDIA Ch 8. Two flavors seeded: byte-identical retries
+(0.7) and same-key-different-payload corrections that carry a strictly higher
+sequence so dedup keeps the correction. A handful (5) land past the 3-day window
+on purpose, so the bounded guarantee is visible, not theoretical.
