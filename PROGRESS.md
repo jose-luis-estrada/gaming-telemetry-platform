@@ -36,8 +36,9 @@ Closed. Do not reopen without a written reason in the Log.
 - **Compaction is a platform capability**, not a producer concern. Delivered by
   the framework. Delta OPTIMIZE, W3.
 - **Unstructured data.** Stack traces stay in the table (column pruning makes
-  them cheap). Screenshots go to UC Volumes as pointer + size + content type +
-  hash. Reference pattern.
+  them cheap). Screenshots go to a Volume as pointer + size + content type +
+  sha256. The blob is named by its content hash, so identical bytes dedup to one
+  file. Reference pattern, content-addressed.
 - **Reprocess window: 3 days.** Derived from the 72-hour max lateness. 27
   partitions are closed and never rewritten.
 - **Dedup window: 3 days.** Same derivation. Global dedup would reopen every
@@ -76,7 +77,7 @@ Closed. Do not reopen without a written reason in the Log.
 - [X] `manifest.json` records exact ground truth for all 5 defects
 - [ ] Each defect verifiable against the manifest with a single query
 - [ ] Same seed produces a bit-identical dataset
-- [ ] Crashes carry text stack traces in-table, binary screenshots out-of-table
+- [X] Crashes carry text stack traces in-table, binary screenshots out-of-table
 - [ ] I can defend all four Week 1 decisions in 90 seconds, no notes
 
 ## Postmortems
@@ -167,3 +168,12 @@ partition stays single-level. File count is not exactly 25,920: at 50M nearly
 every cell fills but late arrivals open extra (event_date, flush_window) files in
 already-passed partitions and push it slightly above, plus the escaped
 duplicates; at test scale most cells are empty and it lands well below.
+
+Closed crash artifacts. event_type "crash" carries a free-text stack_trace in the
+table (semi-structured, cheap under column pruning) and, for a fraction of
+crashes, a screenshot reference: path, bytes, content type, sha256. The binary
+lands in a Volume-like dir named by its content hash, so identical bytes dedup to
+one file and duplicate crashes point at the same blob, many references one file.
+Not every crash carries a screenshot, which bounds binary volume regardless of
+row count. This is the structured / semi-structured / unstructured coverage the
+JD asks for, in one dataset.
