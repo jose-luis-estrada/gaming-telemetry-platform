@@ -177,3 +177,11 @@ one file and duplicate crashes point at the same blob, many references one file.
 Not every crash carries a screenshot, which bounds binary volume regardless of
 row count. This is the structured / semi-structured / unstructured coverage the
 JD asks for, in one dataset.
+
+### 2026-07-16
+Closed the acceptance layer: each seeded defect verified against the manifest in
+one query. Split by kind, not by taste: exact invariants assert and fail loud
+(duplicate counts, the drift boundary at 0 before drift_day), statistical
+fractions report expected-vs-observed and assert only above 100k rows, where
+sampling noise falls under tolerance. These same checks become the W4 quality
+framework in pytest against the full 50M. Ran at 200k: all six pass.
