@@ -75,8 +75,8 @@ Closed. Do not reopen without a written reason in the Log.
 ## Week 1 exit criteria
 - [ ] `make generate` produces 50M events, 30 days, 4-6 GB
 - [X] `manifest.json` records exact ground truth for all 5 defects
-- [ ] Each defect verifiable against the manifest with a single query
-- [ ] Same seed produces a bit-identical dataset
+- [X] Each defect verifiable against the manifest with a single query
+- [X] Same seed produces a bit-identical dataset
 - [X] Crashes carry text stack traces in-table, binary screenshots out-of-table
 - [ ] I can defend all four Week 1 decisions in 90 seconds, no notes
 

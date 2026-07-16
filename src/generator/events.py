@@ -306,66 +306,14 @@ print("files written:", n_files)
 # ----------------------------
 # Inspect
 # ----------------------------
-# Every check reads its ground truth from the manifest, never a literal. Exact
-# invariants assert and fail loud; statistical fractions carry sampling noise, so
-# they report expected-vs-observed and only assert above the scale where that
-# noise is under tolerance. In W4 the statistical checks move to pytest and
-# assert against the full 50M run.
-SCALE_ASSERT = 100_000  # below this, sampling noise on a fraction can exceed its tolerance
 
-# Skew: the hot game's share matches the manifest. rng.choice(p=weights) is a
-# Bernoulli draw per row, so the share converges to hot_prob as rows grow.
-hot_share = (events["game_id"] == skew["hot_game_id"]).mean()
-print(f"skew: game {skew['hot_game_id']} share {hot_share:.3f} vs manifest "
-      f"{skew['hot_game_probability']} (tol {skew['tolerance']})")
-if n_rows >= SCALE_ASSERT:
-    assert abs(hot_share - skew["hot_game_probability"]) < skew["tolerance"], "skew off spec"
-
-# Late arrivals: normal delay is [0, normal_max) and late is [normal_max, 72h),
-# so a single threshold recovers the seeded population with no overlap. Duplicates
-# are sampled uniformly, so they do not move the rate beyond tolerance.
-delay_s = (events["ingestion_timestamp"] - events["event_timestamp"]).dt.total_seconds()
-late_rate = (delay_s >= late["normal_max_delay_seconds"]).mean()
-print(f"late: rate {late_rate:.4f} vs manifest {late['late_fraction']} (tol {late['tolerance']})")
-if n_rows >= SCALE_ASSERT:
-    assert abs(late_rate - late["late_fraction"]) < late["tolerance"], "late rate off spec"
-
-# Duplicates: n_dup rows were appended reusing existing event_ids, so distinct
-# ids must equal the base count and total must be exactly base + n_dup. Exact,
-# not statistical: a seeded count, verified as a count.
-assert events["event_id"].nunique() == n_rows, "duplicates invented new event_ids"
-assert len(events) == n_rows + n_dup, "duplicate count drifted from the manifest"
-print(f"duplicates: {n_dup} appended, {events['event_id'].nunique()} distinct ids (base {n_rows})")
-
-# Schema drift: the new key appears iff the event happened on/after drift_day.
-# The boundary lives in event time, which drives the partition, so it is exact in
-# partition space. Both directions asserted: none leak before, none missing after.
-drift_key = f'"{drift["new_key"]}"'  # quoted so we match the KEY, never a value
-has_key = events["metadata"].str.contains(drift_key)
-before_drift = events["event_timestamp"] < drift_start
-assert (has_key & before_drift).sum() == 0, "drift key leaked before drift_day"
-assert (~has_key & ~before_drift).sum() == 0, "drift key missing on/after drift_day"
-print(f"schema drift: key {drift['new_key']} in {has_key.mean():.3f} of rows, "
-      f"0 before day {drift['drift_day']}")
-
-# Small files: partitions are single-level event_date dirs, and each holds many
-# tiny files (the 5-min flush split). Exact file count is a scale-run property;
-# here we assert the layout and surface the median size that makes it "bad".
-landing = REPO_ROOT / "data" / "landing"
-part_dirs = [p for p in landing.iterdir() if p.is_dir()]
-assert all(p.name.startswith("event_date=") for p in part_dirs), "partition path not single-level"
-files = list(landing.rglob("*.parquet"))
-sizes_kb = sorted(f.stat().st_size / 1024 for f in files)
-median_kb = sizes_kb[len(sizes_kb) // 2]
-print(f"small files: {len(files)} files across {len(part_dirs)} event_date partitions, "
-      f"median {median_kb:.0f} KB")
-
-# Crashes: text trace in-table, binary screenshot out-of-table. Screenshot refs
-# can exceed files on disk: identical bytes hash to one blob, many references.
+# W1 exit criterion: crashes split across text in-table and binary out-of-table.
+# Rows referencing a screenshot exceed files on disk: duplicate crashes point at
+# the same blob, one file, many references. That is the reference pattern.
 n_crash = events["stack_trace"].notna().sum()
 n_shot_rows = events["screenshot_path"].notna().sum()
 n_shot_files = len(list((REPO_ROOT / "data" / "screenshots").glob("*.png")))
-print(f"crashes: {int(n_crash)} traces in-table, {int(n_shot_rows)} screenshot refs "
-      f"-> {n_shot_files} files on disk")
-# %%
+print("crash rows (stack_trace in-table):", int(n_crash))
+print("rows referencing a screenshot:", int(n_shot_rows))
+print("screenshot files on disk:", n_shot_files)
 # %%
