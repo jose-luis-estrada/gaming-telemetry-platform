@@ -185,3 +185,9 @@ one query. Split by kind, not by taste: exact invariants assert and fail loud
 fractions report expected-vs-observed and assert only above 100k rows, where
 sampling noise falls under tolerance. These same checks become the W4 quality
 framework in pytest against the full 50M. Ran at 200k: all six pass.
+
+Added make verify-repro. Runs the generator twice in separate processes and
+compares a root hash of the whole data tree. Separate processes on purpose: a
+fresh rng each time proves "anyone with seed 42 gets this dataset", not just that
+the rng object was untouched between calls. Content hashed, paths sorted, so the
+result is order-independent. Passed at 50k: identical hash both runs.
