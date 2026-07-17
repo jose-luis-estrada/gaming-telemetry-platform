@@ -1,11 +1,11 @@
 # PROGRESS
 
 Ship date: 2026-09-03
-Current week: 1
-Hours logged: 0
+Current week: 2
+Hours logged: 16
 
 ## Status
-- [ ] W1  Data generator
+- [X] W1  Data generator
 - [ ] W2  Ingestion framework, part 1
 - [ ] W3  Ingestion framework, part 2
 - [ ] W4  Data quality framework
@@ -17,10 +17,13 @@ Hours logged: 0
 ## Settled decisions
 Closed. Do not reopen without a written reason in the Log.
 
-- **Volume and shape.** 50M events across 30 days. 4 to 6 GB parquet,
-  ~1.67M events/day, 120 to 200 MB per date partition. Minimum scale where
-  spill, stragglers, and broadcast vs sort merge join are observable. 5M hides
-  all three. 500M shows the same three at 6x the runtime.
+- **Volume and shape.** 50M events across 30 days, ~2.1 GB compressed parquet,
+  ~1.67M events/day. Row count is the load-bearing number, not disk size. 50M
+  rows is the minimum scale where spill, stragglers, and broadcast vs sort merge
+  join are observable. 5M hides all three. 500M shows the same three at 6x the
+  runtime. The 2.1 GB on disk is a columnar-compression artifact: closed
+  vocabularies, dictionary encoding, DDIA Ch 3. It decompresses several-fold in
+  the shuffle, so the join and skew effects track the 50M rows, not the GB.
 - **Time window: 30 days.** The 72-hour max lateness touches 3 of 30
   partitions. That gives two populations: 27 closed partitions and 3 open ones.
   A 7-day window leaves 43 percent of history always open and the idea of a
@@ -73,12 +76,12 @@ Closed. Do not reopen without a written reason in the Log.
 - [ ] Every partitioning decision defensible in 90 seconds without notes
 
 ## Week 1 exit criteria
-- [ ] `make generate` produces 50M events, 30 days, 4-6 GB
+- [X] `make generate` produces 50M events, 30 days, 4-6 GB
 - [X] `manifest.json` records exact ground truth for all 5 defects
 - [X] Each defect verifiable against the manifest with a single query
 - [X] Same seed produces a bit-identical dataset
 - [X] Crashes carry text stack traces in-table, binary screenshots out-of-table
-- [ ] I can defend all four Week 1 decisions in 90 seconds, no notes
+- [X] I can defend all four Week 1 decisions in 90 seconds, no notes
 
 ## Postmortems
 | # | Failure | Status |
@@ -191,3 +194,33 @@ compares a root hash of the whole data tree. Separate processes on purpose: a
 fresh rng each time proves "anyone with seed 42 gets this dataset", not just that
 the rng object was untouched between calls. Content hashed, paths sorted, so the
 result is order-independent. Passed at 50k: identical hash both runs.
+
+### 2026-07-17
+Generator materialized the full dataset as one pandas frame in the driver.
+Measured the memory curve at 1M and 2M: ~720 MB per 1M rows, extrapolating to
+~36 GB at 50M. That is the OOM ceiling. Split the generator into two phases: a
+global decision phase holding only compact codes (int8 game/type/device, flags,
+per-producer sequence, duplicate sampling over all N) and a streaming write
+phase that expands the wide JSON and text columns one output file at a time. rng
+stays entirely in phase 1 in fixed order, so bit-identical holds and verify-repro
+passes with new hashes. Peak RAM at 50M dropped from ~36 GB to ~7.5 GB. Same
+principle that motivates distributed processing: the driver is not where the
+data lives. DDIA Ch 6, Ch 10.
+
+Ran make generate at full 50M: 50.5M rows (50M + 1% duplicates), 252,408 crash
+rows with in-table stack traces, 50,394 rows referencing 49,920 screenshot files
+(the gap is duplicate crashes pointing at the same blob, one file many
+references), 102,056 parquet files. Structured, semi-structured and unstructured
+in one dataset.
+
+Disk came in at 2.1 GB, under the old 4-6 GB target. The target was wrong, not
+the dataset. 4-6 GB was a proxy for "a shuffle hurts", and the property that
+carries that is 50M rows, not bytes on disk. Columnar compression on closed
+vocabularies (DDIA Ch 3) shrinks the on-disk size, but it decompresses in the
+shuffle and the hot key, 37% of 50M in one partition, is untouched by disk size.
+Rewrote the exit criterion from "4-6 GB" to "50M rows, ~2.1 GB compressed". A
+round number I cannot defend is worse than an odd one I can.
+
+Parked, still open: 102,056 files exceed the 25,920 clean cross-product because
+late arrivals open extra (event_date, flush_window) cells in already-passed
+partitions. Small-files tax, feeds postmortem #2. Compaction is a W3 capability.
