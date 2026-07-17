@@ -1,11 +1,11 @@
 # %%
+import hashlib
 import json
+import shutil
 from pathlib import Path
 
-import pandas as pd
 import numpy as np
-import shutil
-import hashlib
+import pandas as pd
 
 # ----------------------------
 # Repo root
@@ -32,13 +32,19 @@ manifest = json.loads(MANIFEST_PATH.read_text())
 
 seed = manifest["seed"]
 n_rows = manifest["rows"]
-skew = manifest["defects"]["skew"]
 window = manifest["event_window"]
+skew = manifest["defects"]["skew"]
+late = manifest["defects"]["late_arrivals"]
+drift = manifest["defects"]["schema_drift"]
+crash = manifest["defects"]["crashes"]
+dup = manifest["defects"]["duplicates"]
+small = manifest["defects"]["small_files"]
 
 # ----------------------------
 # RNG
 # ----------------------------
-# One rng object seeded from the manifest so every draw is reproducible.
+# One rng object seeded from the manifest. Every draw below happens in Phase 1,
+# in a fixed order, so the whole run is reproducible from the seed alone.
 rng = np.random.default_rng(seed)
 
 # ----------------------------
@@ -48,141 +54,24 @@ def build_weights(game_ids, hot_game_id, hot_prob, tolerance):
     # Derive weights from the skew SHAPE: hot game gets hot_prob, the rest split
     # the remainder evenly. Deriving beats hand-typing so weights can't drift.
     if hot_game_id not in game_ids:
-        raise ValueError(
-            f"manifest: hot_game_id {hot_game_id} not in game_ids {game_ids}"
-        )
-    
-    # Guard 2: a probability outside (0, 1) is nonsense, and numpy would only
-    # complain later with a message that never mentions your manifest.
+        raise ValueError(f"manifest: hot_game_id {hot_game_id} not in game_ids {game_ids}")
     if not 0 < hot_prob < 1:
-        raise ValueError(
-            f"manifest: hot game probability {hot_prob} must be between 0 and 1"
-        )
-    
+        raise ValueError(f"manifest: hot game probability {hot_prob} must be between 0 and 1")
     cold_ids = [g for g in game_ids if g != hot_game_id]
-
     if not cold_ids:
         raise ValueError("manifest: need at least one game besides the hot one")
-    
     cold_weight = (1 - hot_prob) / len(cold_ids)
-
     weights = [hot_prob if g == hot_game_id else cold_weight for g in game_ids]
-
     assert abs(sum(weights) - 1.0) < tolerance, f"weights sum to {sum(weights)}"
-
     return weights
 
-# ----------------------------
-# Generate data
-# ----------------------------
-weights = build_weights(
-    game_ids=skew["game_ids"],
-    hot_game_id=skew["hot_game_id"],
-    hot_prob=skew["hot_game_probability"],
-    tolerance=skew["tolerance"]
-)
-
-# start_utc carries the Z, so this Timestamp is tz-aware UTC and every
-# event_timestamp inherits it. One clock, declared, not implicit. DDIA Ch 8.
-start = pd.Timestamp(window["start_utc"])
-window_seconds = window["days"] * 86_400
-# Shared by the base event_type draw and the correction-duplicate redraw.
-event_types = ["login", "logout", "purchase", "match_start", "match_end"]
-
-events = pd.DataFrame({
-    # Sequential ints: reproducible event_id across runs.
-    "event_id": range(1, n_rows + 1),
-    "player_id": rng.integers(1, 20, size=n_rows),
-    # Skew lives in the key distribution, driven by the manifest weights.
-    "game_id": rng.choice(skew["game_ids"], size=n_rows, p=weights),
-    "event_type": rng.choice(event_types, size=n_rows),
-    # Drawn LAST so player_id/game_id/event_type keep the same rng stream and
-    # stay bit-identical. rng.integers excludes the high, i.e. a semi-open
-    # window [start, start+30d). Jan 31 never appears.
-    "event_timestamp": start + pd.to_timedelta(rng.integers(
-        0, window_seconds, size=n_rows), unit="s")
-})
-
-# ----------------------------
-# Late arrivals
-# ----------------------------
-# ingestion_timestamp is when the event landed in the platform, separate from
-# event_timestamp (when it happened). Event time vs processing time, DDIA Ch 11.
-# Drawn AFTER the DataFrame so the earlier columns keep their rng stream.
-late = manifest["defects"]["late_arrivals"]
-normal_max = late["normal_max_delay_seconds"]
-max_late_s = late["max_lateness_hours"] * 3600
-
-is_late = rng.random(n_rows) < late["late_fraction"]
-normal_delay = rng.integers(0, normal_max, size=n_rows)
-# Late delays start where normal ends, so a single threshold separates the two
-# populations with no overlap and the late fraction stays verifiable.
-late_delay = rng.integers(normal_max, max_late_s, size=n_rows)
-delay_seconds = np.where(is_late, late_delay, normal_delay)
-
-# event_timestamp still drives the partition, not this. A late event lands in a
-# partition whose event_date already passed. That is the whole defect.
-events["ingestion_timestamp"] = events["event_timestamp"] + pd.to_timedelta(
-    delay_seconds, unit="s"
-)
-
-# ----------------------------
-# Producer identity
-# ----------------------------
-# Every event carries its producer and that producer's own monotonic sequence.
-# This pair, not the wall clock, is the dedup ordering key: 3 producers, 3
-# clocks. DDIA Ch 8. producer_id is reused later by the small-files defect.
-producer_id = rng.integers(1, 4, size=n_rows) # producers 1..3
-events["producer_id"] = producer_id
-# per-producer counter in emission (row) order
-events["source_sequence_number"] = (
-    pd.Series(producer_id).groupby(producer_id).cumcount().to_numpy()
-)
-
-# ----------------------------
-# Metadata and schema drift
-# ----------------------------
-# metadata lands as a raw JSON string, the way telemetry actually arrives: the
-# platform stores the blob in Bronze and parses it on read. Drift here is a KEY
-# appearing INSIDE the blob, not a new table column. The framework's declared
-# per-source schema is the contract; a key it doesn't know about is the defect.
-drift = manifest["defects"]["schema_drift"]
-
-# Boundary keyed on event_timestamp, not ingestion_timestamp: a producer ships a
-# new client version at a wall-clock moment and every event it EMITS afterward
-# carries the new key. event_timestamp drives the partition, so the boundary is
-# clean in partition space and one query verifies it. DDIA Ch 11.
-drift_start = start + pd.Timedelta(days=drift["drift_day"])
-is_new_schema = events["event_timestamp"] >= drift_start
-
-device = pd.Series(rng.choice(drift["devices"], size=len(events)))
-network = pd.Series(rng.choice(drift["new_key_values"], size=len(events)))
-
-# Closed vocabulary (no quotes to escape), so we interpolate the JSON string
-# vectorized instead of paying a json.dumps call per row across 50M rows.
-before = '{"device": "' + device + '", "app_version": "' + drift["version_before"] + '"}'
-after = (
-    '{"device": "' + device + '", "app_version": "' + drift["version_after"]
-    + '", "' + drift["new_key"] + '": "' + network + '"}'
-)
-events["metadata"] = np.where(is_new_schema, after, before)
-
-# ----------------------------
-# Crashes: text in-table, binary out-of-table
-# ----------------------------
-# A crash carries a free-text stack trace and a screenshot. The trace stays in
-# the table: semi-structured, but column pruning means you never pay to read it
-# unless you select it. The screenshot is binary and goes to a Volume-like dir;
-# the table holds only a reference (path, size, content type, hash). Keep the
-# blob out of the row, keep a pointer in the row.
-crash = manifest["defects"]["crashes"]
-
-is_crash = rng.random(len(events)) < crash["crash_fraction"]
-# Only a subset of crashes capture a screenshot. Realistic, and it bounds the
-# binary volume independent of row count.
-has_shot = is_crash & (rng.random(len(events)) < crash["screenshot_fraction"])
-
-exceptions = ["NullPointerException", "TimeoutException", "OutOfMemoryError"]
+# Vocabularies live as arrays and are referenced BY CODE in the compact frame.
+# The wide string columns get expanded from these codes at write time, one file
+# at a time, so 50M copies of each string never exist at once.
+EVENT_TYPES = np.array(["login", "logout", "purchase", "match_start", "match_end"])
+EXCEPTIONS = np.array(["NullPointerException", "TimeoutException", "OutOfMemoryError"])
+DEVICES = np.array(drift["devices"])
+NETWORKS = np.array(drift["new_key_values"])
 
 def make_trace(exc_name):
     # Synthetic multi-line trace: enough shape to be semi-structured, not real.
@@ -194,111 +83,241 @@ def make_trace(exc_name):
         f"  at engine.core.Main.run(Main.java:57)"
     )
 
-# Build traces only where a crash happened; null for the 99%+ that never crashed.
-events["stack_trace"] = None
-crash_pos = np.flatnonzero(is_crash)
-# A crash is its own event type: keep event_type and stack_trace consistent.
-events.loc[crash_pos, "event_type"] = "crash"
-crash_exc = rng.choice(exceptions, size=crash_pos.size)
-events.loc[crash_pos, "stack_trace"] = [make_trace(e) for e in crash_exc]
+# One trace string per exception, expanded by index in the loop. No per-row
+# f-string over 50M rows.
+TRACES = np.array([make_trace(e) for e in EXCEPTIONS])
 
-# Screenshot binaries land in a Volume-like dir, referenced by content hash.
+# ----------------------------
+# Phase 1: global decisions (compact)
+# ----------------------------
+# Everything that consumes the rng happens here, in a fixed order. Columns are
+# kept as compact codes (int8) and timestamps (int64 under the hood), NOT as
+# strings. The wide JSON/text columns are the memory hog; they are built later,
+# per output file. GLOBAL work (dedup sampling, per-producer sequence) needs
+# every row at once, but only over these cheap arrays. That is what keeps 50M
+# rows off the single-frame ~36 GB ceiling.
+weights = build_weights(
+    skew["game_ids"], skew["hot_game_id"], skew["hot_game_probability"], skew["tolerance"]
+)
+
+# start_utc carries the Z, so this Timestamp is tz-aware UTC and every timestamp
+# inherits it. One clock, declared, not implicit. DDIA Ch 8.
+start = pd.Timestamp(window["start_utc"])
+window_seconds = window["days"] * 86_400
+
+player_id = rng.integers(1, 20, size=n_rows, dtype=np.int8)
+# Skew lives in the key distribution, driven by the manifest weights.
+game_id = rng.choice(skew["game_ids"], size=n_rows, p=weights).astype(np.int8)
+event_type_code = rng.integers(0, len(EVENT_TYPES), size=n_rows, dtype=np.int8)
+# Semi-open window [start, start+30d): the high is excluded, so day 31 never
+# appears and the 30 partitions stay clean.
+event_timestamp = start + pd.to_timedelta(rng.integers(0, window_seconds, size=n_rows), unit="s")
+
+# ingestion_timestamp is when the event landed, separate from when it happened.
+# Event time vs processing time, DDIA Ch 11. Late delays start where normal ends
+# so a single threshold separates the two populations and the late fraction is
+# verifiable, not approximate.
+is_late = rng.random(n_rows) < late["late_fraction"]
+normal_delay = rng.integers(0, late["normal_max_delay_seconds"], size=n_rows)
+late_delay = rng.integers(late["normal_max_delay_seconds"], late["max_lateness_hours"] * 3600, size=n_rows)
+delay_seconds = np.where(is_late, late_delay, normal_delay)
+ingestion_timestamp = event_timestamp + pd.to_timedelta(delay_seconds, unit="s")
+
+producer_id = rng.integers(1, 4, size=n_rows, dtype=np.int8)  # producers 1..3
+device_code = rng.integers(0, len(DEVICES), size=n_rows, dtype=np.int8)
+network_code = rng.integers(0, len(NETWORKS), size=n_rows, dtype=np.int8)
+
+# Schema drift: a metadata KEY appearing from drift_day on. Gated on
+# event_timestamp, not ingestion, so the boundary is clean in partition space
+# and one query verifies it. DDIA Ch 11. Stored as a bool, expanded to JSON later.
+drift_start = start + pd.Timedelta(days=drift["drift_day"])
+is_new_schema = np.asarray(event_timestamp >= drift_start)
+
+# A crash is its own event_type and carries a text stack trace. exc_code is the
+# exception index for crash rows, -1 otherwise: this doubles as the crash flag.
+is_crash = rng.random(n_rows) < crash["crash_fraction"]
+# Only a subset of crashes capture a screenshot: bounds binary volume independent
+# of row count.
+has_shot = is_crash & (rng.random(n_rows) < crash["screenshot_fraction"])
+exc_code = np.full(n_rows, -1, dtype=np.int8)
+crash_pos = np.flatnonzero(is_crash)
+exc_code[crash_pos] = rng.integers(0, len(EXCEPTIONS), size=crash_pos.size)
+
+# Screenshot binaries: written once here, named by content hash (identical bytes
+# collapse to one file). The row keeps only an index into this small table, so
+# the null-heavy pointer columns never exist over all 50M rows.
 shots_dir = REPO_ROOT / "data" / "screenshots"
 if shots_dir.exists():
     shutil.rmtree(shots_dir)
 shots_dir.mkdir(parents=True, exist_ok=True)
 
-# Reference columns default to null: no screenshot means no pointer. bytes is a
-# nullable Int64 so parquet gets a real integer column, not object.
-events["screenshot_path"] = None
-events["screenshot_bytes"] = pd.array([pd.NA] * len(events), dtype="Int64")
-events["screenshot_content_type"] = None
-events["screenshot_sha256"] = None
-
 shot_pos = np.flatnonzero(has_shot)
-sizes = rng.integers(
+shot_sizes = rng.integers(
     crash["screenshot_min_bytes"], crash["screenshot_max_bytes"], size=shot_pos.size
 )
-paths, byts, ctypes, digests = [], [], [], []
-for size in sizes:
+shot_idx = np.full(n_rows, -1, dtype=np.int32)  # -1 = no screenshot
+shot_paths, shot_bytes, shot_types, shot_digests = [], [], [], []
+for size in shot_sizes:
     # Deterministic bytes from the rng so the dataset stays bit-identical by seed.
     blob = rng.bytes(int(size))
     digest = hashlib.sha256(blob).hexdigest()
     (shots_dir / f"{digest}.png").write_bytes(blob)
-    paths.append(f"screenshots/{digest}.png")
-    byts.append(int(size))
-    ctypes.append("image/png")
-    digests.append(digest)
+    shot_paths.append(f"screenshots/{digest}.png")
+    shot_bytes.append(int(size))
+    shot_types.append("image/png")
+    shot_digests.append(digest)
+shot_idx[shot_pos] = np.arange(shot_pos.size, dtype=np.int32)
+shot_table = {
+    "path": np.array(shot_paths, dtype=object),
+    "bytes": np.array(shot_bytes, dtype="int64"),
+    "ctype": np.array(shot_types, dtype=object),
+    "sha256": np.array(shot_digests, dtype=object),
+}
 
-events.loc[shot_pos, "screenshot_path"] = paths
-events.loc[shot_pos, "screenshot_bytes"] = byts
-events.loc[shot_pos, "screenshot_content_type"] = ctypes
-events.loc[shot_pos, "screenshot_sha256"] = digests
+# The compact base frame: every column is a code, a flag, or a timestamp. This
+# is the whole dataset's worth of DECISIONS, holdable in memory at 50M.
+events = pd.DataFrame(
+    {
+        "event_id": np.arange(1, n_rows + 1, dtype=np.int64),  # sequential, reproducible
+        "player_id": player_id,
+        "game_id": game_id,
+        "event_type_code": event_type_code,
+        "event_timestamp": event_timestamp,
+        "ingestion_timestamp": ingestion_timestamp,
+        "producer_id": producer_id,
+        "device_code": device_code,
+        "network_code": network_code,
+        "is_new_schema": is_new_schema,
+        "exc_code": exc_code,  # -1 = not a crash
+        "shot_idx": shot_idx,  # -1 = no screenshot
+    }
+)
+
+# per-producer monotonic counter in emission order. GLOBAL (needs the full
+# producer column) but only over an int8 array. Paired with producer_id, this is
+# the dedup ordering key: 3 producers, 3 clocks. DDIA Ch 8.
+events["source_sequence_number"] = events.groupby("producer_id").cumcount().astype(np.int64)
 
 # ----------------------------
 # Duplicates
 # ----------------------------
-dup = manifest["defects"]["duplicates"]
+# Sampled GLOBALLY over all N rows: a duplicate can come from anywhere, so this
+# cannot be done per-partition. Cheap here because we only copy compact codes.
 n_dup = int(n_rows * dup["duplicate_fraction"])
 dup_idx = rng.choice(n_rows, size=n_dup, replace=False)
-dups = events.iloc[dup_idx].copy()
+dups = events.iloc[dup_idx].reset_index(drop=True).copy()
 
 # Tail of the duplicate set are corrections: same event_id, redrawn payload, and
 # a strictly higher sequence so dedup keeps the correction over the original.
 n_identical = int(n_dup * dup["byte_identical_ratio"])
 is_correction = np.arange(n_dup) >= n_identical
 if is_correction.sum() > 0:
-    dups.loc[is_correction, "event_type"] = rng.choice(
-        event_types, size=int(is_correction.sum())
-    )
+    dups.loc[is_correction, "event_type_code"] = rng.integers(
+        0, len(EVENT_TYPES), size=int(is_correction.sum())
+    ).astype(np.int8)
     dups.loc[is_correction, "source_sequence_number"] += 1_000_000
 
-# A few duplicates land past the 3-day dedup window, so they survive dedup on
-# purpose. This is what makes the bounded guarantee visible, not theoretical.
-escape = np.arange(n_dup)[: dup ["out_of_window_count"]]
+# A few duplicates land past the 3-day dedup window on purpose, so they survive
+# dedup and the bounded guarantee is visible, not theoretical. Only ingestion
+# time moves; event_time (and thus the partition) is unchanged.
+escape = np.arange(n_dup)[: dup["out_of_window_count"]]
 col = dups.columns.get_loc("ingestion_timestamp")
-dups.iloc[escape, col] = dups.iloc[escape, col] + pd.Timedelta(
-    hours=dup["dedup_window_hours"]
-) + pd.Timedelta(hours=1)
+dups.iloc[escape, col] = (
+    dups.iloc[escape, col]
+    + pd.Timedelta(hours=dup["dedup_window_hours"])
+    + pd.Timedelta(hours=1)
+)
 
 events = pd.concat([events, dups], ignore_index=True)
 
 # ----------------------------
-# Write files
+# Phase 2: streaming write (expand heavy columns per file)
 # ----------------------------
-# event_date (from event_timestamp) is the PARTITION directory, single level.
-# The file split WITHIN a partition is one producer's flush window, keyed on
-# ingestion_timestamp: partition = event time, file = processing time. A late
-# event lands in an old event_date directory via a new flush. DDIA Ch 11.
-small = manifest["defects"]["small_files"]
+# Partition = event time, file = processing time. event_date directory from
+# event_timestamp; within it one file per (producer, 5-min flush window) keyed on
+# ingestion_timestamp. A late event lands in an old event_date via a new flush.
+# DDIA Ch 11. Both grouping keys stay as cheap datetime64, never object strings.
 flush = f"{small['flush_minutes']}min"
-
-events["event_date"] = events["event_timestamp"].dt.strftime("%Y-%m-%d")
-# Floor the producer's wall clock to the flush cadence: every event a producer
-# received in the same 5-minute window flushes together into one file.
+events["event_day"] = events["event_timestamp"].dt.floor("D")
 events["flush_window"] = events["ingestion_timestamp"].dt.floor(flush)
 
 out = REPO_ROOT / "data" / "landing"
-# Clean stale runs so file counts stay verifiable against the manifest.
 if out.exists():
-    shutil.rmtree(out)
+    shutil.rmtree(out)  # clean stale runs so file counts stay verifiable
+
+def expand(group):
+    # Build the wide string columns for THIS file's rows only. event_type,
+    # metadata JSON and stack_trace exist for a few hundred rows here, never for
+    # all 50M at once. This function is pure: it consumes no rng.
+    g = group.reset_index(drop=True)
+    n = len(g)
+
+    event_type = EVENT_TYPES[g["event_type_code"].to_numpy()].astype(object)
+    is_crash = g["exc_code"].to_numpy() >= 0
+    event_type[is_crash] = "crash"  # a crash overrides whatever type was drawn
+
+    # Closed vocabulary, no quotes to escape, so we interpolate the JSON string
+    # vectorized instead of a json.dumps call per row.
+    dev = pd.Series(DEVICES[g["device_code"].to_numpy()])
+    net = pd.Series(NETWORKS[g["network_code"].to_numpy()])
+    before = '{"device": "' + dev + '", "app_version": "' + drift["version_before"] + '"}'
+    after = (
+        '{"device": "' + dev + '", "app_version": "' + drift["version_after"]
+        + '", "' + drift["new_key"] + '": "' + net + '"}'
+    )
+    metadata = np.where(g["is_new_schema"].to_numpy(), after, before)
+
+    stack_trace = np.full(n, None, dtype=object)
+    stack_trace[is_crash] = TRACES[g["exc_code"].to_numpy()[is_crash]]
+
+    # Screenshot reference columns default to null; a valid shot_idx pulls the
+    # pointer (path, size, type, hash) from the small shot table.
+    si = g["shot_idx"].to_numpy()
+    has = si >= 0
+    screenshot_path = np.full(n, None, dtype=object)
+    screenshot_bytes = pd.array([pd.NA] * n, dtype="Int64")  # nullable int, real column
+    screenshot_content_type = np.full(n, None, dtype=object)
+    screenshot_sha256 = np.full(n, None, dtype=object)
+    if has.any():
+        screenshot_path[has] = shot_table["path"][si[has]]
+        screenshot_bytes[has] = shot_table["bytes"][si[has]]
+        screenshot_content_type[has] = shot_table["ctype"][si[has]]
+        screenshot_sha256[has] = shot_table["sha256"][si[has]]
+
+    # Widen the compact ints back to int64 so the on-disk schema is unchanged.
+    return pd.DataFrame(
+        {
+            "event_id": g["event_id"],
+            "player_id": g["player_id"].astype(np.int64),
+            "game_id": g["game_id"].astype(np.int64),
+            "event_type": event_type,
+            "event_timestamp": g["event_timestamp"],  # tz-aware preserved
+            "ingestion_timestamp": g["ingestion_timestamp"],
+            "producer_id": g["producer_id"].astype(np.int64),
+            "source_sequence_number": g["source_sequence_number"],
+            "metadata": metadata,
+            "stack_trace": stack_trace,
+            "screenshot_path": screenshot_path,
+            "screenshot_bytes": screenshot_bytes,
+            "screenshot_content_type": screenshot_content_type,
+            "screenshot_sha256": screenshot_sha256,
+        }
+    )
 
 n_files = 0
-# One file per (event_date, producer, flush window): 3 producers x 288 windows
-# x 30 days ~ 25,920 tiny files. Deliberately bad. Compaction is a W3 platform
-# capability, not the producer's job.
-for (event_date, producer_id, flush_window), group in events.groupby(
-    ["event_date", "producer_id", "flush_window"], sort=False
+# One file per (event_date, producer, flush window). At 50M nearly every cell
+# fills, plus late arrivals open extra cells in already-passed partitions.
+# Deliberately many tiny files: compaction is a W3 platform capability, not the
+# producer's job.
+for (event_day, producer, flush_window), group in events.groupby(
+    ["event_day", "producer_id", "flush_window"], sort=False
 ):
+    event_date = pd.Timestamp(event_day).strftime("%Y-%m-%d")  # format once per file
     part_dir = out / f"event_date={event_date}"  # single-level Hive partition
     part_dir.mkdir(parents=True, exist_ok=True)
-    stamp = flush_window.strftime("%Y%m%dT%H%M")
-    fname = f"part-p{producer_id}-{stamp}.parquet"
-    # Drop the two bookkeeping columns: event_date is implied by the directory,
-    # flush_window was only ever a grouping key, not part of the event schema.
-    group.drop(columns=["event_date", "flush_window"]).to_parquet(
-        part_dir / fname, index=False
-    )
+    stamp = pd.Timestamp(flush_window).strftime("%Y%m%dT%H%M")
+    fname = f"part-p{producer}-{stamp}.parquet"
+    expand(group).to_parquet(part_dir / fname, index=False)
     n_files += 1
 
 print("files written:", n_files)
@@ -306,14 +325,14 @@ print("files written:", n_files)
 # ----------------------------
 # Inspect
 # ----------------------------
-
-# W1 exit criterion: crashes split across text in-table and binary out-of-table.
-# Rows referencing a screenshot exceed files on disk: duplicate crashes point at
-# the same blob, one file, many references. That is the reference pattern.
-n_crash = events["stack_trace"].notna().sum()
-n_shot_rows = events["screenshot_path"].notna().sum()
+# Crashes split across text in-table and binary out-of-table. Rows referencing a
+# screenshot exceed files on disk: duplicate crashes point at the same blob, one
+# file, many references. That is the reference pattern.
+n_crash = int((events["exc_code"] >= 0).sum())
+n_shot_rows = int((events["shot_idx"] >= 0).sum())
 n_shot_files = len(list((REPO_ROOT / "data" / "screenshots").glob("*.png")))
-print("crash rows (stack_trace in-table):", int(n_crash))
-print("rows referencing a screenshot:", int(n_shot_rows))
+print("total rows:", len(events))
+print("crash rows (stack_trace in-table):", n_crash)
+print("rows referencing a screenshot:", n_shot_rows)
 print("screenshot files on disk:", n_shot_files)
 # %%
