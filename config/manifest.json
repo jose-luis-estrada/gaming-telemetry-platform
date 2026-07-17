@@ -1,6 +1,6 @@
 {
   "seed": 42,
-  "rows": 100,
+  "rows": 50000000,
   "event_window": {
     "start_utc": "2026-01-01T00:00:00Z",
     "days": 30,
