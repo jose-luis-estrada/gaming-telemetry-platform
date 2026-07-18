@@ -83,6 +83,21 @@ Closed. Do not reopen without a written reason in the Log.
 - [X] Crashes carry text stack traces in-table, binary screenshots out-of-table
 - [X] I can defend all four Week 1 decisions in 90 seconds, no notes
 
+## Week 2 exit criteria
+- [ ] A config file declares one source: landing path, format, expected
+      schema, partition column, dedup key. Framework reads config, nothing
+      hardcoded in the notebook.
+- [ ] Framework reads the W1 landing parquet and writes Bronze as a Delta
+      table partitioned by event_date. Bronze is as-landed: metadata stays a
+      raw JSON string, no parsing, no dedup. Bronze = append-only landing
+      contract, DDIA Ch 3.
+- [ ] Ingestion is idempotent: re-running the same batch does not re-append
+      the same source files. The seeded semantic duplicates are data and
+      survive into Bronze untouched (they get resolved in Silver, W4-W5).
+- [ ] Runs in local PySpark (Docker), DAG readable in the Spark UI at
+      localhost:4040. Same code path runs on Databricks against the S3 landing.
+- [ ] PROGRESS.md records this section (this).
+
 ## Postmortems
 | # | Failure | Status |
 |---|---------|--------|
