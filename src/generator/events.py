@@ -285,7 +285,7 @@ def expand(group):
         screenshot_sha256[has] = shot_table["sha256"][si[has]]
 
     # Widen the compact ints back to int64 so the on-disk schema is unchanged.
-    return pd.DataFrame(
+    out = pd.DataFrame(
         {
             "event_id": g["event_id"],
             "player_id": g["player_id"].astype(np.int64),
@@ -303,6 +303,12 @@ def expand(group):
             "screenshot_sha256": screenshot_sha256,
         }
     )
+    # Producer owns schema stability: force a string dtype on the nullable
+    # text columns so a batch with no crashes/screenshots writes them as
+    # parquet STRING, not a null/int type. DDIA Ch 4.
+    for col in ("stack_trace", "screenshot_path", "screenshot_content_type", "screenshot_sha256"):
+        out[col] = out[col].astype("string")
+    return out
 
 n_files = 0
 # One file per (event_date, producer, flush window). At 50M nearly every cell
