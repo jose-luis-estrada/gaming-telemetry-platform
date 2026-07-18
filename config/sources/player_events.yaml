@@ -3,9 +3,6 @@ format: parquet
 landing_path: data/landing
 bronze_table: bronze.player_events
 
-read_options:
-  mergeSchema: "true"   # absorb a drifted source instead of failing. DDIA Ch 4.
-
 # Declared contract. Bronze does NOT enforce this; Silver will.
 schema:
   - { name: event_id, type: long }
