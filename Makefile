@@ -17,3 +17,6 @@ verify-repro:
 		&& echo "REPRODUCIBLE: $$(cat .repro_a)" \
 		|| { echo "NOT REPRODUCIBLE"; diff .repro_a .repro_b; exit 1; }
 	@rm -f .repro_a .repro_b
+
+ingest:
+	python -m src.ingestion.run
