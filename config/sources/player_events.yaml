@@ -1,0 +1,28 @@
+name: player_events
+format: parquet
+landing_path: data/landing
+bronze_table: bronze.player_events
+
+read_options:
+  mergeSchema: "true"   # absorb a drifted source instead of failing. DDIA Ch 4.
+
+# Declared contract. Bronze does NOT enforce this; Silver will.
+schema:
+  - { name: event_id, type: long }
+  - { name: player_id, type: long }
+  - { name: game_id, type: long }
+  - { name: event_type, type: string }
+  - { name: event_timestamp, type: timestamp }
+  - { name: ingestion_timestamp, type: timestamp }
+  - { name: producer_id, type: long }
+  - { name: source_sequence_number, type: long }
+  - { name: metadata, type: string }
+  - { name: stack_trace, type: string }
+
+# Used in W5. The dedup ordering key: 3 producers, 3 clocks. DDIA Ch 8.
+dedup_key: [producer_id, source_sequence_number]
+
+# Used in W4.
+quality_rules:
+  - { column: event_id, rule: not_null }
+  - { column: event_timestamp, rule: not_null }
