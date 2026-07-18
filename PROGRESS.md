@@ -239,3 +239,36 @@ round number I cannot defend is worse than an odd one I can.
 Parked, still open: 102,056 files exceed the 25,920 clean cross-product because
 late arrivals open extra (event_date, flush_window) cells in already-passed
 partitions. Small-files tax, feeds postmortem #2. Compaction is a W3 capability.
+
+### 2026-07-18
+Opened W2. First cut of the config-driven ingestion framework: one source
+onboarded by YAML, read into Bronze Delta, zero notebook code. The thesis lives
+in run.py, a loop over config/sources/*.yaml, so source #4 is a config change,
+not a code change.
+
+Source contract in config/sources/player_events.yaml. Fields split by when they
+bite: format, landing_path and bronze_table act now; schema, dedup_key and
+quality_rules are declared now but enforced downstream (schema in Silver,
+dedup_key in W5, quality_rules in W4). One file holds the whole contract. Loader
+(config.py) fails loud: a missing required field, an unknown format, or a typo'd
+key raises instead of ingesting garbage silently.
+
+Bronze is schema-on-read. No .schema() on the reader, so a drifted source lands
+instead of failing the job. Enforcement is Silver's problem. DDIA Ch 4. This is
+why the W1 metadata drift survives ingestion untouched.
+
+Idempotency by overwrite, not append. mode("overwrite") means a re-run replaces
+the table, so running ingest twice does not duplicate. Doctrine says Bronze is
+append-only; true incremental idempotent ingest (Autoloader checkpoint or MERGE)
+is W3, deferred on purpose. Trade-off stated, not hidden. The seeded semantic
+duplicates from W1 are data and pass through into Bronze; they get resolved in
+Silver.
+
+Lineage on every row: _source_name, _source_file (input_file_name), _ingested_at,
+_batch_id. This is the cataloging/lineage capability the JD names, and the first
+thing on-call reads at 3 AM: which file, which run. bronze_path maps the logical
+contract name to a local Delta path; on Databricks the same name registers as a
+Unity Catalog table and only the resolver changes, not the config.
+
+Local Spark: local[*] with the Delta extension via configure_spark_with_delta_pip,
+the environment where the DAG is readable in the Spark UI.
