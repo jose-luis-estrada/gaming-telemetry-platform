@@ -71,6 +71,11 @@ def ingest_source(spark: SparkSession, cfg: SourceConfig) -> int:
     (
         out.write.format("delta")
         .mode("overwrite")
+        # Read-side pruning. event_date comes from the landing path via Hive
+        # partition discovery, not from the file body, so nothing is derived here.
+        # overwrite replaces all partitions, which is what makes the W2 re-run
+        # idempotent; incremental replaceWhere/MERGE is W3. DDIA Ch 6.
+        .partitionBy("event_date")
         .option("overwriteSchema", "true")  # tolerate a changed source schema
         .save(bronze_path(cfg))
     )
