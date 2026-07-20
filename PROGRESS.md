@@ -1,12 +1,12 @@
 # PROGRESS
 
 Ship date: 2026-09-03
-Current week: 2
-Hours logged: 16
+Current week: 3
+Hours logged: 30
 
 ## Status
 - [X] W1  Data generator
-- [ ] W2  Ingestion framework, part 1
+- [X] W2  Ingestion framework, part 1
 - [ ] W3  Ingestion framework, part 2
 - [ ] W4  Data quality framework
 - [ ] W5  Skew and joins
@@ -272,3 +272,28 @@ Unity Catalog table and only the resolver changes, not the config.
 
 Local Spark: local[*] with the Delta extension via configure_spark_with_delta_pip,
 the environment where the DAG is readable in the Spark UI.
+
+### 2026-07-20
+Closed W2. Two things landed on top of the 07-18 framework cut.
+
+partitionBy("event_date") on the Bronze write, completing exit criterion #2.
+event_date is recovered from the Hive-partitioned landing path via Spark
+partition discovery, not derived from event_timestamp, so nothing is computed and
+Bronze stays as-landed. Read-side pruning, DDIA Ch 6. overwrite still replaces the
+whole table, which is the W2 idempotency mechanism; incremental replaceWhere /
+Autoloader is W3.
+
+Idempotency verified, not just implemented. Ran make ingest twice in separate
+processes: both landed 50,500,000 rows (50M + the 1% seeded duplicates, which
+Bronze keeps by design). Same discipline as W1 verify-repro: separate processes
+prove the result does not depend on in-memory state. _batch_id and _ingested_at
+change between runs by design (provenance) and do not affect count idempotency.
+
+First read of the local Spark UI. The ingest save spawned 3,190 tasks for 2.1 GB.
+Not the volume: 102,056 landing files at ~200 KB each hit the 4 MB open cost
+(spark.sql.files.openCostInBytes), so bin-packing lands ~32 files per 128 MB
+partition and 102,056 / 32 = 3,190. The small-files tax made visible, the number
+to beat for postmortem #2. OPTIMIZE / compaction is the W3 capability that
+collapses it. DDIA Ch 3.
+
+W2 exit criteria all met. Current week -> 3.
