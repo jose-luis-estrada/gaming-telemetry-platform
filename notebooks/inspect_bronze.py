@@ -1,9 +1,14 @@
 # %%
+import os
+os.chdir("/Users/joseestrada/projects/gaming-telemetry-platform")
+
 # Scratch cells for inspecting Bronze in the local Spark UI.
 # Not part of the framework: run.py stays the production entry point with its
 # own spark.stop(). Here we leave the session alive so the UI stays up.
 from src.ingestion.config import load_source_config
 from src.ingestion.bronze import build_spark, ingest_source, bronze_path
+
+
 
 spark = build_spark()
 cfg = load_source_config("config/sources/player_events.yaml")
@@ -20,3 +25,4 @@ df.select("event_date").distinct().orderBy("event_date").show(5)
 # %%
 # Run this LAST, once you are done looking at the UI, to free the port and RAM.
 spark.stop()
+# %%
