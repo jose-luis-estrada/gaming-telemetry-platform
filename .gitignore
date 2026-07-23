@@ -223,3 +223,4 @@ data/
 .venv/
 .DS_Store
 .repro_*
+upload.log
