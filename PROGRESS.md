@@ -2,7 +2,7 @@
 
 Ship date: 2026-09-03
 Current week: 3
-Hours logged: 34
+Hours logged: 37
 
 ## How to read this file
 
@@ -161,6 +161,32 @@ reason in the Log.
   re-ingests the full landing and silently doubles Bronze. The job still exits
   green. This is an operational silent defect and a RUNBOOK entry.
 
+- **Local vs cloud lives behind one Environment seam, not an `if` in the
+  ingestion logic.** The rejected option was a `TELEMETRY_ENV` conditional
+  inside `ingest_source`. It lost because the W3 criterion is explicit: "only
+  the path resolver changes, no branching in the ingestion logic itself." A
+  `get_environment()` factory returns a `LocalEnvironment` or
+  `DatabricksEnvironment`, each owning exactly the three things that differ:
+  the SparkSession (local builds it with the Delta extension, Databricks hands
+  it over serverless), the landing root (`data/landing` vs
+  `/Volumes/workspace/telemetry/landing`), and the terminal write verb
+  (`.save(path)` unmanaged Delta locally vs `.saveAsTable(name)` registering a
+  managed Unity Catalog table). `bronze.py` and `run.py` hold an `Environment`
+  and never check where they run. The single surviving conditional is in
+  `get_environment()`, read once at the program edge. DDIA Ch 3: logical name
+  stable, physical binding swapped. The `.saveAsTable` to UC is what earns the
+  cataloging and lineage line in the JD; an unmanaged path-based Delta does not
+  register in the catalog.
+- **Per-row source-file lineage is environment-provided, not hardcoded.**
+  `input_file_name()` is blocked under Unity Catalog (UC_COMMAND_NOT_SUPPORTED)
+  because it is fragile under query optimization. Rather than branch in
+  `add_lineage`, the source-file column expression is supplied by the
+  Environment: `input_file_name()` locally, `_metadata.file_path` on UC. Same
+  seam, same principle: the difference lives in the resolver, `add_lineage`
+  stays environment-blind. Using `_metadata.file_path` in both would tie the
+  local Docker to a specific Spark version and erase the reason for the local
+  UI, so the difference is kept, not flattened.
+
 ### Cloud landing zone
 
 - **The Databricks landing is a UC Volume, not an S3 external location.**
@@ -234,9 +260,13 @@ All met 2026-07-20.
 - [X] A cloud landing that Databricks can actually read exists: UC Volume
       `workspace.telemetry.landing`, 3 event_date partitions, 10,211 files,
       per-partition counts verified against local (3401, 3408, 3402).
-- [ ] The W2 Bronze ingestion code runs on Databricks Free Edition against the
+- [X] The W2 Bronze ingestion code runs on Databricks Free Edition against the
       cloud landing. Only the path resolver changes between local and cloud, no
-      branching in the ingestion logic itself.
+      branching in the ingestion logic itself. Verified 2026-07-28:
+      `workspace.telemetry.bronze_player_events` landed in Unity Catalog with
+      5,049,334 rows across event_date 2026-01-14/15/16 (1,682,896 / 1,683,546 /
+      1,682,892), balanced within 0.04%. Two-run overwrite stability still to be
+      re-confirmed on cloud (see Open loose ends).
 - [ ] Incremental idempotent ingestion via Autoloader (Trigger.AvailableNow),
       replacing the W2 overwrite hack. Re-running ingests only new files; row
       count stable across runs; the checkpoint is the idempotency mechanism,
@@ -272,6 +302,13 @@ Things genuinely undecided. Do not build around these.
 - Migrate the full game distribution (`[0.37, 0.21, 0.21, 0.21]`) and
   corresponding game ID list from hardcoded values in `events.py` into
   `manifest.json`.
+- Medallion naming for the Bronze target. `bronze_table: bronze.player_events`
+  is declared in the YAML but the resolver derives the target from `cfg.name`
+  (local `data/bronze/player_events`, UC `workspace.telemetry.bronze_player_events`),
+  so `bronze_table` is declared-but-unused since W2. Undecided: whether "bronze"
+  lives as a table-name prefix (`bronze_player_events`), a separate UC schema
+  (`workspace.bronze.player_events`), or the config field. Deferred on purpose;
+  keeping `cfg.name` means the local run is byte-identical while the seam lands.
 
 ## Open loose ends
 
@@ -287,6 +324,17 @@ Not decisions, just unfinished chores. Each is small and each is verifiable.
       targeting only this bucket. Parked deliberately during setup so it would
       not block the week; it is a least-privilege story worth having.
 - [X] `src/ingestion/__init__.py` is missing.
+- [ ] Re-confirm two-run overwrite stability on Databricks: run the notebook
+      twice and check `bronze_player_events` holds 5,049,334 both times. The
+      first cloud attempt failed halfway on the input_file_name error; overwrite
+      forgives that partial write by replacing it, but the forgiveness should be
+      seen, not assumed. Matters because the Autoloader checkpoint (criterion #4)
+      will NOT forgive a partial run the same way.
+- [ ] `config.py` treats an empty-string field as missing (empty string is
+      falsy), so `landing_path: ""` raised "missing required field". Worked
+      around with `landing_path: "."`, which the resolver strips back to the
+      landing root. The real fix is distinguishing "key present" from "value
+      truthy" in the loader; parked so it does not reopen config semantics today.
 
 ## Parked
 
@@ -557,3 +605,39 @@ by hand to unstick a job at 3 AM, or a changed path in the YAML. Recovery is
 because the Delta transaction log is append-only and old versions still exist.
 The checkpoint and time travel are the same idea applied twice: an append-only
 log lets you know what you already did, and lets you undo it. DDIA Ch 3.
+
+### 2026-07-28
+Extracted the environment seam and ran W2 ingestion on Databricks against the
+Volume. Three env-specific things moved behind an Environment strategy
+(`environment.py`): SparkSession construction, landing root, terminal write
+verb. `bronze.py` and `run.py` now hold an Environment and never check where
+they run; the only conditional is `get_environment()`, read once. Verified
+locally first: `make ingest` still lands 50,500,000 rows, unchanged from W2, so
+the refactor is behavior-preserving. Committed as its own conceptual change.
+
+`landing_path` in the YAML went from a local path to a value relative to the
+landing root. `config.py` rejected `""` as a missing field (empty string is
+falsy), so it is `"."`, which the resolver strips to the root. Same YAML
+resolves in both environments: local `data/landing`, cloud
+`/Volumes/workspace/telemetry/landing`. Loose end logged to fix the loader's
+present-vs-truthy check later.
+
+First cloud run failed with UC_COMMAND_NOT_SUPPORTED on `input_file_name()`.
+Unity Catalog blocks it because it is fragile under query optimization and
+points to `_metadata.file_path`, a governed metadata column stable across any
+file read. This is a genuine local-vs-cloud capability gap, not a code bug: the
+same function works locally and is forbidden on UC. Rather than branch in
+`add_lineage`, the source-file expression is now Environment-provided
+(`input_file_name()` local, `_metadata.file_path` UC), so the seam absorbs the
+difference. RUNBOOK candidate. Committed separately from the seam refactor.
+
+Second run succeeded: `workspace.telemetry.bronze_player_events` exists in Unity
+Catalog, 5,049,334 rows, three event_date partitions 2026-01-14/15/16 at
+1,682,896 / 1,683,546 / 1,682,892, balanced within 0.04%. That balance is the W1
+design confirmed in the cloud: skew lives on the game_id axis, not the time
+axis, so the partitions stay even and the W5 straggler will have one cause. The
+5.05M is the 3-day subset (~1.683M/day x 3) plus the 1% seeded duplicates Bronze
+keeps by design; it is not 50.5M because the Volume is a deliberate subset, per
+the Cloud landing zone decision. Local 50.5M vs cloud 5.05M is two copies doing
+two jobs, not a broken pipeline. W3 criterion #3 closed. Databricks is now a
+defensible resume line.
