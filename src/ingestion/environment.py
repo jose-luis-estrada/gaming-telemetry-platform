@@ -51,6 +51,11 @@ class Environment:
         # is the terminal verb, which is why it lives here and nowhere else.
         raise NotImplementedError
 
+    def source_file_col(self):
+        # Column expression that identifies the source file per row. The two
+        # environments expose this through different APIs, so the difference
+        # lives here, not in bronze.py. This keeps add_lineage identical in both.
+        raise NotImplementedError
 
 class LocalEnvironment(Environment):
     LANDING_ROOT = "data/landing"
@@ -81,6 +86,11 @@ class LocalEnvironment(Environment):
         # Path-based (unmanaged) Delta: the files ARE the table, no catalog entry.
         writer.save(f"{self.BRONZE_ROOT}/{cfg.name}")
 
+    def source_file_col(self):
+        from pyspark.sql import functions as F
+        # Legacy Spark API. Works locally; Unity Catalog blocks it (UC_COMMAND_
+        # NOT_SUPPORTED) because it is fragile under query optimization.
+        return F.input_file_name()
 
 class DatabricksEnvironment(Environment):
     LANDING_ROOT = "/Volumes/workspace/telemetry/landing"
@@ -105,6 +115,11 @@ class DatabricksEnvironment(Environment):
         # schema, so no new schema is created today.
         writer.saveAsTable(f"{self.UC_SCHEMA}.bronze_{cfg.name}")
 
+    def source_file_col(self):
+        from pyspark.sql import functions as F
+        # UC-governed metadata column. Stable across any file read; the
+        # replacement UC recommends over input_file_name().
+        return F.col("_metadata.file_path")
 
 def get_environment() -> Environment:
     # The single surviving conditional, read once at the edge. Everything
