@@ -267,7 +267,7 @@ All met 2026-07-20.
       5,049,334 rows across event_date 2026-01-14/15/16 (1,682,896 / 1,683,546 /
       1,682,892), balanced within 0.04%. Two-run overwrite stability still to be
       re-confirmed on cloud (see Open loose ends).
-- [ ] Incremental idempotent ingestion via Autoloader (Trigger.AvailableNow),
+- [X] Incremental idempotent ingestion via Autoloader (Trigger.AvailableNow),
       replacing the W2 overwrite hack. Re-running ingests only new files; row
       count stable across runs; the checkpoint is the idempotency mechanism,
       not overwrite. DDIA Ch 3.
@@ -668,3 +668,16 @@ from cfg.name at runtime: keeping it declared preserves the choice of whether a
 retargeted source keeps or resets its checkpoint. Local run still lands
 50,500,000, refactor is behavior-preserving. Cloud two-run stability not yet
 confirmed, so criterion #4 stays unchecked.
+
+Ran it on Databricks. Two consecutive runs of the ingest cell both returned
+5,049,334, partitions 2026-01-14/15/16 at 1,682,896 / 1,683,546 / 1,682,892,
+same as the W2 overwrite run. Stable count with no doubling is the idempotency
+evidence: a fresh-checkpoint re-read would have appended a second 5.05M and
+landed ~10M, and it did not. Criterion #4 closed. Note: the ingest cell prints
+the full-table read-back count, so stability is the final-state check; the
+per-run "zero new files" proof lives in query.recentProgress, not surfaced yet.
+
+Setup gap found and fixed: the checkpoints Volume did not exist
+(UC_VOLUME_NOT_FOUND on the cleanup rm). A UC Volume is a declared governed
+object, not an auto-created folder, so writing to /Volumes/.../checkpoints/
+needs CREATE VOLUME first, same as landing. RUNBOOK candidate.
