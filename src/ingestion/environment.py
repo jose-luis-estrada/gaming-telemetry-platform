@@ -183,6 +183,20 @@ class DatabricksEnvironment(Environment):
         # availableNow returns immediately. Block until it drains every file, or the
         # program exits mid-ingest and leaves a partial run. Non-negotiable.
         query.awaitTermination()
+        
+        # Per-run visibility: recentProgress is the only place that shows what
+        # Autoloader actually read THIS run, as opposed to the final table count
+        # below. Empty list or numInputRows=0 is the file-level idempotency proof:
+        # the checkpoint already knows 14/15/16 and skipped them. This is Databricks
+        # -only (batch has no StreamingQuery), so the seam in bronze.py stays blind.
+        progress = query.recentProgress
+        if not progress:
+            # AvailableNow can finish without committing any micro-batch when there
+            # are no new files, so the list is empty rather than a batch of 0 rows.
+            print(f"{cfg.name}: no micro-batch ran, checkpoint reports zero new files")
+        for p in progress:
+            print(f"{cfg.name}: batch {p['batchId']} numInputRows={p['numInputRows']}")
+
         # Read-back count of the whole table: a streaming df has no .count() (it is
         # unbounded, it throws), and the total table is what must be stable across runs.
         return self.spark().read.table(table).count()
