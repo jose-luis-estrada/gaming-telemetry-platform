@@ -9,7 +9,6 @@
 
 import os
 from pyspark.sql import SparkSession
-from pyspark.sql.readwriter import DataFrameWriter
 
 from src.ingestion.config import SourceConfig
 
@@ -45,10 +44,26 @@ class Environment:
     def _landing_root(self) -> str:
         raise NotImplementedError
 
-    def write_bronze(self, writer: DataFrameWriter, cfg: SourceConfig) -> None:
-        # Receives a writer already configured in bronze.py (format, mode,
-        # partitionBy, overwriteSchema). The ONLY step that differs by environment
-        # is the terminal verb, which is why it lives here and nowhere else.
+    def checkpoint_uri(self, cfg: SourceConfig) -> str:
+        # Same shape as landing_uri: stable logical name in the YAML, physical
+        # root swapped by environment. DDIA Ch 3: logical name stable, binding swapped.
+        root = self._checkpoint_root()
+        rel = (cfg.checkpoint_path or "").strip("/.")
+        return f"{root}/{rel}" if rel else root
+
+    def _checkpoint_root(self) -> str:
+        raise NotImplementedError
+
+    def read_source(self, cfg: SourceConfig, checkpoint_uri: str):
+        # Batch reader locally, Autoloader stream on cloud. The two are different
+        # objects (DataFrameReader vs DataStreamReader), which is exactly why this
+        # cannot live in bronze.py without an if. checkpoint_uri unused in batch.
+        raise NotImplementedError
+
+    def write_bronze(self, df, cfg: SourceConfig, checkpoint_uri: str) -> int:
+        # Was write_bronze(writer, cfg). Now owns the WHOLE write, because a batch
+        # writer and a stream writer share no terminal verb. Returns the read-back
+        # table count, which is the number that must be stable across two runs.
         raise NotImplementedError
 
     def source_file_col(self):
@@ -60,6 +75,7 @@ class Environment:
 class LocalEnvironment(Environment):
     LANDING_ROOT = "data/landing"
     BRONZE_ROOT = "data/bronze"
+    CHECKPOINT_ROOT = "data/checkpoints"
 
     def _build_spark(self) -> SparkSession:
         # Local wires the Delta extension by hand via configure_spark_with_delta_pip,
@@ -82,9 +98,27 @@ class LocalEnvironment(Environment):
     def _landing_root(self) -> str:
         return self.LANDING_ROOT
 
-    def write_bronze(self, writer: DataFrameWriter, cfg: SourceConfig) -> None:
-        # Path-based (unmanaged) Delta: the files ARE the table, no catalog entry.
-        writer.save(f"{self.BRONZE_ROOT}/{cfg.name}")
+    def _checkpoint_root(self) -> str:
+        return self.CHECKPOINT_ROOT
+
+    def read_source(self, cfg: SourceConfig, checkpoint_uri: str):
+        reader = self.spark().read.format(cfg.format)
+        for k, v in cfg.read_options.items():
+            reader = reader.option(k, v)
+        # Hive partition discovery recovers event_date from the path. No .schema():
+        # schema-on-read, a drifted source lands. Same as W2.
+        return reader.load(self.landing_uri(cfg))
+
+    def write_bronze(self, df, cfg: SourceConfig, checkpoint_uri: str) -> int:
+        path = f"{self.BRONZE_ROOT}/{cfg.name}"
+        # overwrite: O(total), destroys history. Fine for a learning env whose job
+        # is the Spark UI. checkpoint_uri ignored here on purpose.
+        (df.write.format("delta").mode("overwrite")
+            .partitionBy("event_date").option("overwriteSchema", "true")
+            .save(path))
+        # Count the WRITTEN table, not df.count(): symmetric with the cloud path
+        # and avoids recomputing the whole lazy pipeline.
+        return self.spark().read.format("delta").load(path).count()
 
     def source_file_col(self):
         from pyspark.sql import functions as F
@@ -95,6 +129,7 @@ class LocalEnvironment(Environment):
 class DatabricksEnvironment(Environment):
     LANDING_ROOT = "/Volumes/workspace/telemetry/landing"
     UC_SCHEMA = "workspace.telemetry"
+    CHECKPOINT_ROOT = "/Volumes/workspace/telemetry/checkpoints"
 
     def _build_spark(self) -> SparkSession:
         # Serverless already has an active session. getOrCreate() returns it
@@ -109,11 +144,48 @@ class DatabricksEnvironment(Environment):
     def _landing_root(self) -> str:
         return self.LANDING_ROOT
 
-    def write_bronze(self, writer: DataFrameWriter, cfg: SourceConfig) -> None:
-        # Managed UC table: the catalog owns the name -> files mapping. bronze_
-        # prefix namespaces the medallion layer inside the existing telemetry
-        # schema, so no new schema is created today.
-        writer.saveAsTable(f"{self.UC_SCHEMA}.bronze_{cfg.name}")
+    def _checkpoint_root(self) -> str:
+        return self.CHECKPOINT_ROOT
+
+    def read_source(self, cfg: SourceConfig, checkpoint_uri: str):
+        reader = (
+            self.spark().readStream.format("cloudFiles")
+            .option("cloudFiles.format", cfg.format)
+            # Where Autoloader persists the schema it infers, so it can tell
+            # "same schema" from "evolved". Durable state, same lifetime as the
+            # checkpoint, so it sits under it.
+            .option("cloudFiles.schemaLocation", f"{checkpoint_uri}/schema")
+        )
+        for k, v in cfg.read_options.items():
+            reader = reader.option(k, v)
+        # No explicit schema. Parquet is self-describing so every file shares the
+        # physical schema (metadata is a string column in all of them). The seeded
+        # drift is a KEY inside that JSON string, NOT a physical column, so Autoloader
+        # never sees evolution and the drift lands silently. The W1 "JSON string over
+        # physical column" decision is what buys this. DDIA Ch 4.
+        return reader.load(self.landing_uri(cfg))
+
+    def write_bronze(self, df, cfg: SourceConfig, checkpoint_uri: str) -> int:
+        table = f"{self.UC_SCHEMA}.bronze_{cfg.name}"
+        query = (
+            df.writeStream.format("delta")
+            # THE idempotency mechanism now. The file registry lives here: Autoloader
+            # remembers which files it already read. Delete it and it re-ingests all
+            # 10,211 files and the job STILL exits green. RUNBOOK entry.
+            .option("checkpointLocation", f"{checkpoint_uri}/checkpoint")
+            .partitionBy("event_date")
+            # Process every file available right now across as many micro-batches as
+            # needed, then STOP. Batch-shaped run on the streaming engine. The only
+            # trigger Free Edition supports, and exactly what incremental batch wants.
+            .trigger(availableNow=True)
+            .toTable(table)          # managed UC table -> catalog + lineage
+        )
+        # availableNow returns immediately. Block until it drains every file, or the
+        # program exits mid-ingest and leaves a partial run. Non-negotiable.
+        query.awaitTermination()
+        # Read-back count of the whole table: a streaming df has no .count() (it is
+        # unbounded, it throws), and the total table is what must be stable across runs.
+        return self.spark().read.table(table).count()
 
     def source_file_col(self):
         from pyspark.sql import functions as F

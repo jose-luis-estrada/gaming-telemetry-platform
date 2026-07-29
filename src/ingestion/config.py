@@ -20,6 +20,8 @@ class SourceConfig:
     format: str
     landing_path: str
     bronze_table: str
+    checkpoint_path: str    # NEW. Stable per-(source,target) dir; env resolves ther root
+                            # Ignored locally (batch), THE idempotency mechanism on cloud.
     read_options: dict = field(default_factory=dict)
     # Declared, not acted on in Bronze. Schema-on-read: Bronze never enforces
     # these, so a source can drift (new key mid-stream) without the ingest
@@ -32,7 +34,7 @@ def load_source_config(path: str | Path) -> SourceConfig:
     raw = yaml.safe_load(Path(path).read_text())
     # Fail loud on a broken contract instead of ingesting garbage silently: an
     # unnamed source or an unknown format is an author error, not a runtime guess.
-    required = ["name", "format", "landing_path", "bronze_table"]
+    required = ["name", "format", "landing_path", "bronze_table", "checkpoint_path"]
     missing = [k for k in required if not raw.get(k)]
     if missing:
         raise ValueError(f"{path}: source config missing required fields: {missing}")

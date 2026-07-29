@@ -641,3 +641,30 @@ keeps by design; it is not 50.5M because the Volume is a deliberate subset, per
 the Cloud landing zone decision. Local 50.5M vs cloud 5.05M is two copies doing
 two jobs, not a broken pipeline. W3 criterion #3 closed. Databricks is now a
 defensible resume line.
+
+### 2026-07-29
+Extended the environment seam to own the full read and write, not just the
+terminal verb, so Autoloader fits behind it. Reason it was forced: Autoloader
+is Databricks-only (cloudFiles) and writes through writeStream/.toTable(), a
+different API from the batch DataFrameWriter/.save(). A single terminal-verb
+swap could not cover it. Local stays batch (overwrite), its job is the Spark UI
+and Autoloader does not exist there; cloud goes streaming with
+Trigger.AvailableNow, the only trigger Free Edition supports. The seam holds
+without an if in bronze.py because add_lineage is byte-identical on batch and
+streaming DataFrames: the DataFrame transformation API is the same on both. That
+invariance is the proof the seam is real, not cosmetic.
+
+Idempotency mechanism moved from overwrite to the Autoloader checkpoint.
+Rejected MERGE: it gives row-level idempotency (do not re-insert the same row)
+at the cost of a shuffle against the whole table every run. Autoloader gives
+file-level idempotency (do not re-read the same file), O(new) not O(total), and
+Bronze stays append-only. Row-level dedup is Silver's job, not Bronze's. The
+checkpoint is a per-(source,target) append-only log of files already read, same
+idea as the Delta transaction log. DDIA Ch 3.
+
+New required config field checkpoint_path, declared in the YAML next to
+landing_path, resolved by checkpoint_uri() mirroring landing_uri(). Not derived
+from cfg.name at runtime: keeping it declared preserves the choice of whether a
+retargeted source keeps or resets its checkpoint. Local run still lands
+50,500,000, refactor is behavior-preserving. Cloud two-run stability not yet
+confirmed, so criterion #4 stays unchecked.

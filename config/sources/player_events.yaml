@@ -2,6 +2,7 @@ name: player_events
 format: parquet
 landing_path: "."
 bronze_table: bronze.player_events
+checkpoint_path: player_events
 
 # Declared contract. Bronze does NOT enforce this; Silver will.
 schema:

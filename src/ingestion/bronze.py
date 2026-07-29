@@ -24,22 +24,8 @@ def add_lineage(df: DataFrame, source_name: str, batch_id: str, source_file_col)
 # ----------------------------
 def ingest_source(env: Environment, cfg: SourceConfig) -> int:
     batch_id = uuid.uuid4().hex
+    checkpoint = env.checkpoint_uri(cfg)                 # stable per-(source,target) dir
 
-    reader = env.spark().read.format(cfg.format)
-    for k, v in cfg.read_options.items():
-        reader = reader.option(k, v)
-    # Schema-on-read: no .schema(...), a drifted source lands instead of failing.
-    # event_date recovered from the landing path via Hive partition discovery in
-    # BOTH environments, which is why this logic is identical local and cloud.
-    raw = reader.load(env.landing_uri(cfg))
-
-    out = add_lineage(raw, cfg.name, batch_id, env.source_file_col())
-
-    writer = (
-        out.write.format("delta")
-        .mode("overwrite")
-        .partitionBy("event_date")               # read-side pruning, DDIA Ch 6
-        .option("overwriteSchema", "true")
-    )
-    env.write_bronze(writer, cfg)                # .save() local, .saveAsTable() UC
-    return out.count()
+    raw = env.read_source(cfg, checkpoint)               # batch OR Autoloader stream
+    out = add_lineage(raw, cfg.name, batch_id, env.source_file_col())  # IDENTICAL both envs
+    return env.write_bronze(out, cfg, checkpoint)        # env picks overwrite vs Autoloader
