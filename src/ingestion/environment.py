@@ -126,6 +126,11 @@ class LocalEnvironment(Environment):
         # NOT_SUPPORTED) because it is fragile under query optimization.
         return F.input_file_name()
 
+    def delta_table(self, cfg, spark):
+        from delta.tables import DeltaTable
+        # Unmanaged Delta local: la tabla se direcciona por su path.
+        return DeltaTable.forPath(spark, self.bronze_path(cfg))
+
 class DatabricksEnvironment(Environment):
     LANDING_ROOT = "/Volumes/workspace/telemetry/landing"
     UC_SCHEMA = "workspace.telemetry"
@@ -183,7 +188,7 @@ class DatabricksEnvironment(Environment):
         # availableNow returns immediately. Block until it drains every file, or the
         # program exits mid-ingest and leaves a partial run. Non-negotiable.
         query.awaitTermination()
-        
+
         # Per-run visibility: recentProgress is the only place that shows what
         # Autoloader actually read THIS run, as opposed to the final table count
         # below. Empty list or numInputRows=0 is the file-level idempotency proof:
@@ -206,6 +211,11 @@ class DatabricksEnvironment(Environment):
         # UC-governed metadata column. Stable across any file read; the
         # replacement UC recommends over input_file_name().
         return F.col("_metadata.file_path")
+
+    def delta_table(self, cfg, spark):
+        from delta.tables import DeltaTable
+        # Managed UC table: se direcciona por catalog.schema.name.
+        return DeltaTable.forName(spark, self.bronze_target(cfg))
 
 def get_environment() -> Environment:
     # The single surviving conditional, read once at the edge. Everything
