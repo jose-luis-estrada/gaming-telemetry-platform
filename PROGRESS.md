@@ -2,7 +2,7 @@
 
 Ship date: 2026-09-03
 Current week: 3
-Hours logged: 37
+Hours logged: 41
 
 ## How to read this file
 
@@ -59,6 +59,13 @@ production shape and the real IAM and CLI story; the Volume is the executable
 path. Both are honest as long as the difference is stated, which is what this
 table is for.
 
+Note (2026-07-31): the local landing was restructured from source-at-root to a
+per-source subtree. Each source now owns `data/landing/<source>/event_date=...`,
+so `data/landing/player_events/` and `data/landing/purchases/` coexist. See the
+settled decision "Per-source landing subtree" and Log 2026-07-31. The Volume
+still has player_events at its root and must be mirrored before the next cloud
+run (Open loose ends).
+
 ## Definition of done
 
 The project is finished when all six hold. Items 4, 5 and 6 are the project.
@@ -76,7 +83,7 @@ Items 1 through 3 are scaffolding.
 
 - [X] W1  Data generator
 - [X] W2  Ingestion framework, part 1
-- [ ] W3  Ingestion framework, part 2 (in progress)
+- [X] W3  Ingestion framework, part 2
 - [ ] W4  Data quality framework
 - [ ] W5  Skew and joins
 - [ ] W6  Gold, late data, lineage
@@ -144,7 +151,10 @@ reason in the Log.
 ### Platform
 
 - **Compaction is a platform capability**, not a producer concern. Delivered by
-  the framework. Delta OPTIMIZE, W3.
+  the framework. Delta OPTIMIZE, W3. Delivered 2026-07-30 as `optimize.py` behind
+  the Environment seam (`env.delta_table(cfg, spark)` addresses the table by path
+  locally, by name on UC). See Log 2026-07-30 for what the before/after actually
+  measured.
 - **Bronze idempotency in W2 is `mode("overwrite")`, and that is temporary.**
   Overwrite guarantees idempotency by rewriting everything: O(total) per run,
   and it destroys history, which contradicts the append-only Bronze contract.
@@ -160,21 +170,18 @@ reason in the Log.
   checkpoint makes Autoloader treat every file as new, so the next run
   re-ingests the full landing and silently doubles Bronze. The job still exits
   green. This is an operational silent defect and a RUNBOOK entry.
-
 - **Local vs cloud lives behind one Environment seam, not an `if` in the
   ingestion logic.** The rejected option was a `TELEMETRY_ENV` conditional
   inside `ingest_source`. It lost because the W3 criterion is explicit: "only
   the path resolver changes, no branching in the ingestion logic itself." A
   `get_environment()` factory returns a `LocalEnvironment` or
-  `DatabricksEnvironment`, each owning exactly the three things that differ:
-  the SparkSession (local builds it with the Delta extension, Databricks hands
-  it over serverless), the landing root (`data/landing` vs
-  `/Volumes/workspace/telemetry/landing`), and the terminal write verb
-  (`.save(path)` unmanaged Delta locally vs `.saveAsTable(name)` registering a
-  managed Unity Catalog table). `bronze.py` and `run.py` hold an `Environment`
-  and never check where they run. The single surviving conditional is in
-  `get_environment()`, read once at the program edge. DDIA Ch 3: logical name
-  stable, physical binding swapped. The `.saveAsTable` to UC is what earns the
+  `DatabricksEnvironment`, each owning exactly the things that differ: the
+  SparkSession, the landing root, the read (batch vs Autoloader), and the
+  terminal write verb (`.save(path)` unmanaged Delta locally vs `.toTable(name)`
+  registering a managed Unity Catalog table). `bronze.py` and `run.py` hold an
+  `Environment` and never check where they run. The single surviving conditional
+  is in `get_environment()`, read once at the program edge. DDIA Ch 3: logical
+  name stable, physical binding swapped. The UC table is what earns the
   cataloging and lineage line in the JD; an unmanaged path-based Delta does not
   register in the catalog.
 - **Per-row source-file lineage is environment-provided, not hardcoded.**
@@ -186,6 +193,19 @@ reason in the Log.
   stays environment-blind. Using `_metadata.file_path` in both would tie the
   local Docker to a specific Spark version and erase the reason for the local
   UI, so the difference is kept, not flattened.
+- **Per-source landing subtree.** Each source owns `landing_root/<source>/`,
+  declared in its YAML `landing_path`. The rejected option was leaving
+  player_events at `landing_path: "."` (the whole landing root), which is how W2
+  shipped. It lost the moment a second source arrived: the root reader
+  (`reader.load(landing_uri)`) reads recursively, so a second source anywhere
+  under the root gets swept into player_events and Spark throws on conflicting
+  directory structures. The first source had silently claimed the entire
+  landing. The fix is a config change (`landing_path: "."` -> `player_events`)
+  plus a data relocation into the subtree, zero framework code. This is both the
+  platform thesis demonstrated (onboarding is config, not code) and a latent
+  single-source assumption corrected. It applies to both environments because
+  the YAML path is shared: the local subtree is done, the Volume is not yet (see
+  Open loose ends). Log 2026-07-31.
 
 ### Cloud landing zone
 
@@ -218,6 +238,7 @@ reason in the Log.
   incremental ingest demo. Uploading it after a clean Autoloader run proves the
   checkpoint picks up only new files. Without a held-back partition there is
   nothing left to add and incremental ingestion can only be asserted, not shown.
+  Demonstrated 2026-07-30 (Log).
 
 ## Week 1 exit criteria
 
@@ -254,6 +275,8 @@ All met 2026-07-20.
 
 ## Week 3 exit criteria
 
+All met 2026-07-31.
+
 - [X] Landing data lives in AWS S3, uploaded via AWS CLI under a dedicated IAM
       user (`jlestrada-cli`), not root. Object counts verified against the W1
       manifest: 102,056 parquet and 49,920 screenshots, both exact.
@@ -265,20 +288,31 @@ All met 2026-07-20.
       branching in the ingestion logic itself. Verified 2026-07-28:
       `workspace.telemetry.bronze_player_events` landed in Unity Catalog with
       5,049,334 rows across event_date 2026-01-14/15/16 (1,682,896 / 1,683,546 /
-      1,682,892), balanced within 0.04%. Two-run overwrite stability still to be
-      re-confirmed on cloud (see Open loose ends).
+      1,682,892), balanced within 0.04%.
 - [X] Incremental idempotent ingestion via Autoloader (Trigger.AvailableNow),
       replacing the W2 overwrite hack. Re-running ingests only new files; row
       count stable across runs; the checkpoint is the idempotency mechanism,
       not overwrite. DDIA Ch 3.
-- [ ] The incremental claim is demonstrated, not asserted: uploading the
+- [X] The incremental claim is demonstrated, not asserted: uploading the
       held-back partition 2026-01-17 after a clean run causes Autoloader to
-      pick up that partition and nothing else.
-- [ ] OPTIMIZE compaction runs as a framework capability and collapses the
-      small-files tax. Before and after file count and task count recorded.
-      Feeds postmortem #2. DDIA Ch 3 (LSM compaction).
-- [ ] A second source is onboarded by adding one YAML file, zero new ingestion
-      code. Platform thesis demonstrated, not asserted.
+      pick up that partition and nothing else. Verified 2026-07-30: 14/15/16
+      byte-identical, 2026-01-17 landed at 1,683,475, total 5,049,334 ->
+      6,732,809, delta equals the new partition exactly.
+- [X] OPTIMIZE compaction runs as a framework capability. Before and after file
+      count recorded. Verified 2026-07-30. The finding reframed postmortem #2:
+      Bronze arrived already packed (6 files) because serverless optimizes the
+      Autoloader write, so the small-files tax does NOT live in Bronze. OPTIMIZE
+      moved 6 -> 4 files (tx log: numRemovedFiles 4, numAddedFiles 2), partition
+      -aware within event_date. The tax lives in the landing (10,211 files at
+      ~8 KB, 3,190 local tasks), which is where postmortem #2 belongs. DDIA Ch 3
+      (LSM compaction). See Log 2026-07-30.
+- [X] A second source is onboarded by adding one YAML file, zero new ingestion
+      code. Platform thesis demonstrated, not asserted. Verified 2026-07-31:
+      `purchases` (different schema, 150,000 rows across 2026-01-14/15/16) landed
+      to `data/bronze/purchases` via `config/sources/purchases.yaml` and a
+      standalone producer. `git status src/ingestion/` empty: no framework code
+      touched. Onboarding surfaced the per-source-landing-subtree finding
+      (Settled decisions). See Log 2026-07-31.
 - [X] PROGRESS.md records this section and the Free Edition landing-zone
       decision in the Log.
 
@@ -290,7 +324,7 @@ what I would do differently at 100x scale. Written by hand, not drafted.
 | # | Failure | Status | Evidence collected so far |
 |---|---------|--------|---------------------------|
 | 1 | Skew | not started | Seeded at 37% on one game_id. Straggler not yet observed. |
-| 2 | Small files | evidence gathered, not written | 102,056 files. 3,190 tasks for 2.1 GB from the 4 MB openCostInBytes floor. Four taxed resources documented (compute, API, latency, disk slack). Awaiting OPTIMIZE before/after. |
+| 2 | Small files | evidence gathered, not written | Tax lives in the LANDING: 102,056 files (10,211 in the cloud subset) at ~8 KB, 3,190 local tasks from the 4 MB openCostInBytes floor. Four taxed resources documented (compute, API, latency, disk slack). Reframed 2026-07-31: Bronze arrives packed (serverless optimizes the Autoloader write), so OPTIMIZE on Bronze moves 6 -> 4 files, not thousands. The story is where the tax is born (producer -> landing), the engine mitigating it in the write, and OPTIMIZE as the explicit lever. |
 | 3 | Duplicates | not started | 1% seeded, two flavors, 5 escaping the 3-day window. Survive into Bronze by design. |
 | 4 | Late-arriving data | not started | 2-3% up to 72h late, verified against manifest. |
 | 5 | Schema drift | not started | `network_type` key appears from drift_day 15. Boundary verified at 0 before. |
@@ -309,32 +343,39 @@ Things genuinely undecided. Do not build around these.
   lives as a table-name prefix (`bronze_player_events`), a separate UC schema
   (`workspace.bronze.player_events`), or the config field. Deferred on purpose;
   keeping `cfg.name` means the local run is byte-identical while the seam lands.
+- **Partition column is hardcoded.** `write_bronze` calls `partitionBy("event_date")`
+  as a literal in both environments. This works for player_events and purchases
+  because both are event-shaped, but it means the framework is not truly source
+  -agnostic: a dimensional source with no event_date (device_metadata was the
+  candidate) would break the write. Undecided: whether the partition column
+  becomes a declared YAML field read into `write_bronze`, or whether event_date
+  is a deliberate platform contract that all sources must carry. Surfaced while
+  onboarding the second source, 2026-07-31.
 
 ## Open loose ends
 
 Not decisions, just unfinished chores. Each is small and each is verifiable.
 
-- [X] AWS budget alert created (Billing and Cost Management, monthly cost
-      budget at $5, plus a zero-spend budget). First two budgets are free.
-- [X] Block Public Access confirmed on the bucket. Verify with
-      `aws s3api get-public-access-block --bucket gaming-telemetry-landing-jlestrada`;
-      all four flags must be true. Matters more than usual here because the
-      uploaded screenshots contain account and IAM identifiers.
-- [ ] `jlestrada-cli` scoped down from `AmazonS3FullAccess` to an inline policy
-      targeting only this bucket. Parked deliberately during setup so it would
-      not block the week; it is a least-privilege story worth having.
-- [X] `src/ingestion/__init__.py` is missing.
-- [ ] Re-confirm two-run overwrite stability on Databricks: run the notebook
-      twice and check `bronze_player_events` holds 5,049,334 both times. The
-      first cloud attempt failed halfway on the input_file_name error; overwrite
-      forgives that partial write by replacing it, but the forgiveness should be
-      seen, not assumed. Matters because the Autoloader checkpoint (criterion #4)
-      will NOT forgive a partial run the same way.
+- [ ] Mirror the per-source landing subtree onto the UC Volume before the next
+      cloud run. `player_events.yaml` now declares `landing_path: player_events`,
+      shared across both environments, but the Volume still has event_date dirs
+      at its root (`/Volumes/workspace/telemetry/landing/event_date=...`). The
+      cloud Autoloader will look for `.../landing/player_events/event_date=...`
+      and find nothing until the Volume files are relocated. Do NOT run cloud
+      until this is done. Relocating also invalidates the Autoloader checkpoint
+      path implicitly, so confirm the checkpoint story after the move.
+- [ ] `.log` files (`upload.log`, `upload_17.log`) are in the repo root. Add
+      `*.log` to `.gitignore` and remove them from tracking; they can carry
+      account and Volume path identifiers.
 - [ ] `config.py` treats an empty-string field as missing (empty string is
       falsy), so `landing_path: ""` raised "missing required field". Worked
       around with `landing_path: "."`, which the resolver strips back to the
-      landing root. The real fix is distinguishing "key present" from "value
-      truthy" in the loader; parked so it does not reopen config semantics today.
+      landing root. Now that player_events uses `landing_path: player_events`,
+      the `"."` workaround is no longer in play for that source, but the loader
+      still cannot tell "key present" from "value truthy". The real fix is
+      distinguishing the two in the loader; parked.
+- [ ] Re-confirm two-run overwrite/checkpoint stability on the restructured
+      Volume once mirrored.
 
 ## Parked
 
@@ -358,6 +399,9 @@ coming back through the side door.
 - **Uploading screenshots to the UC Volume.** The unstructured-data story is
   already carried by S3 and the local dataset. Autoloader and OPTIMIZE do not
   need them.
+- **A second seeded defect for purchases.** purchases exists to prove
+  onboarding, not to add a sixth failure. It carries a different schema and no
+  defects on purpose; the five postmortems are already scoped.
 
 ## Log
 
@@ -681,3 +725,78 @@ Setup gap found and fixed: the checkpoints Volume did not exist
 (UC_VOLUME_NOT_FOUND on the cleanup rm). A UC Volume is a declared governed
 object, not an auto-created folder, so writing to /Volumes/.../checkpoints/
 needs CREATE VOLUME first, same as landing. RUNBOOK candidate.
+
+### 2026-07-30
+Criterion #5 closed: incremental ingest demonstrated, not asserted. Uploaded
+the held-back partition 2026-01-17 (3397 files, remote verified against local
+before ingest). Re-ran ingestion: 14/15/16 stayed byte-identical
+(1,682,896 / 1,683,546 / 1,682,892), a new 2026-01-17 landed at 1,683,475, and
+the total moved 5,049,334 -> 6,732,809. The ingest delta equals the new
+partition exactly and nothing else was re-read: file-level idempotency and
+incremental pickup, both visible in the partition table.
+
+Finding: top-level numInputRows in recentProgress is not a reliable per-run
+signal on serverless AvailableNow. Three batches ran, all reported None, yet
+1,683,475 rows landed. Authoritative per-run count is the Delta transaction log
+(DESCRIBE HISTORY, operationMetrics.numOutputRows). RUNBOOK candidate.
+
+Criterion #6 closed: OPTIMIZE runs as a framework capability. Added `optimize.py`
+plus a `delta_table(cfg, spark)` method on each Environment (path locally via
+DeltaTable.forPath, name on UC via DeltaTable.forName), reusing the same seam as
+the write verb, no branching in framework code. Committed as its own change.
+
+The measurement reframed postmortem #2, and this is the honest part. Checked
+SHOW TBLPROPERTIES first: `delta.autoOptimize.optimizeWrite` is NOT set, so the
+before count is real, not pre-shrunk by an implicit property. But the before was
+still only 6 files at 79 MB, not thousands: serverless optimizes the Autoloader
+write itself, so Bronze arrives already packed. OPTIMIZE moved 6 -> 4 files
+(tx log: numRemovedFiles 4, numAddedFiles 2, added ~19-20 MB files). It touched
+4 files and left 2 because OPTIMIZE is partition-aware: bin-packing only merges
+within an event_date partition, so it consolidated where a partition held 2+
+small files and left the singletons. DDIA Ch 6: the partition that gives read
+pruning is the same boundary that bounds compaction.
+
+Consequence: the small-files tax does NOT live in Bronze. It lives in the
+landing (10,211 files at ~8 KB in the cloud subset, 102,056 locally, 3,190 local
+tasks). The producer writes small files; the engine mitigates in the write;
+OPTIMIZE is the explicit lever for the rest. Postmortem #2 is that three-layer
+story, not a fake 3,190 -> few collapse on Bronze. A verified honest number
+beats an inflated one.
+
+### 2026-07-31
+Criterion #7 closed: second source onboarded, zero framework code. Added
+`config/sources/purchases.yaml` (different schema: purchase_id, player_id,
+item_id, item_category, currency, price_usd, purchase_timestamp) and a
+standalone producer `src/generator/purchases.py` writing 150,000 rows across
+2026-01-14/15/16 under the Hive layout. `make ingest` landed both sources in one
+pass: player_events 50,500,000, purchases 150,000. `git status --short
+src/ingestion/` came back empty: no change to bronze.py, config.py, run.py,
+environment.py. run.py picks up the new source purely from
+`sorted(SOURCES_DIR.glob("*.yaml"))`. The producer is a client of the platform,
+not the platform, so the only new code is a data source, not ingestion logic.
+That empty git status is the thesis demonstrated, not asserted.
+
+The finding: onboarding the second source exposed that player_events had claimed
+the entire landing root via `landing_path: "."`. The root reader loads
+recursively, so any second source under the root gets swept into player_events
+and Spark throws on conflicting directory structures. The first source had
+silently assumed it was the only one. Fix is a per-source landing subtree: each
+source declares `landing_path: <source>` and owns `landing_root/<source>/`.
+`player_events.yaml` changed `"."` -> `player_events` and its local data moved
+into `data/landing/player_events/`. Config plus data layout, zero framework
+code. Settled decision recorded.
+
+Cross-environment consequence, logged as a loose end: the YAML landing_path is
+shared, so the Volume must be restructured into the same subtree before the next
+cloud run, or the cloud Autoloader will look for `.../landing/player_events/`
+and find nothing. Not done today; W3's thesis is proven locally where run.py and
+config.py are identical to cloud.
+
+Also surfaced, logged as an Open decision: `partitionBy("event_date")` is a
+hardcoded literal in write_bronze. purchases works only because it is
+event-shaped. A dimensional source (device_metadata was the rejected candidate
+for exactly this reason) would break the write. Undecided whether the partition
+column becomes a YAML field or event_date is a platform contract all sources
+must carry.
+
+W3 exit criteria all met. Review session next before opening W4.

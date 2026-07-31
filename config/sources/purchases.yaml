@@ -1,0 +1,28 @@
+name: purchases
+format: parquet
+landing_path: purchases
+bronze_table: bronze.purchases
+checkpoint_path: purchases
+ 
+# Declared contract. Bronze does NOT enforce this; Silver will. Deliberately a
+# DIFFERENT schema from player_events: this is what proves the platform thesis.
+# The framework ingests columns it has never seen, with zero new ingestion code,
+# because Bronze is schema-on-read. DDIA Ch 4.
+schema:
+  - { name: purchase_id, type: long }
+  - { name: player_id, type: long }
+  - { name: item_id, type: long }
+  - { name: item_category, type: string }
+  - { name: currency, type: string }
+  - { name: price_usd, type: double }
+  - { name: purchase_timestamp, type: timestamp }
+ 
+# Used in W5. A purchase is unique by its id, and there is a single producer
+# here, so there is no 3-clock problem to reconcile. Contrast player_events.
+dedup_key: [purchase_id]
+ 
+# Used in W4.
+quality_rules:
+  - { column: purchase_id, rule: not_null }
+  - { column: price_usd, rule: not_null }
+ 
