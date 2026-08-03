@@ -22,5 +22,42 @@ dedup_key: [producer_id, source_sequence_number]
 
 # Used in W4.
 quality_rules:
-  - { column: event_id, rule: not_null }
-  - { column: event_timestamp, rule: not_null }
+  # --- row-level rules: next session (quarantine to a rejects table) ---
+  # - { column: event_id, rule: not_null }
+  # - { column: event_timestamp, rule: not_null }
+
+  # --- aggregate rules: this session (assert loud / report and pass) ---
+  # hard: exact invariant. The drift key must not exist before drift_day.
+  # observed must be 0, not "close to 0", so this asserts and fails the run.
+  - name: schema_drift_before_boundary
+    severity: hard
+    query: |
+      SELECT COUNT(*) AS observed
+      FROM bronze
+      WHERE event_date < '2026-01-15'
+        AND get_json_object(metadata, '$.network_type') IS NOT NULL
+    assert: { op: eq, value: 0 }
+
+  # soft: seeded skew. One game_id holds ~37% of events. Statistical, so report
+  # expected-vs-observed and pass within tolerance.
+  - name: hot_game_share
+    severity: soft
+    query: |
+      SELECT MAX(share) AS observed FROM (
+        SELECT game_id, COUNT(*) / (SELECT COUNT(*) FROM bronze) AS share
+        FROM bronze GROUP BY game_id
+      )
+    expected: 0.37
+    tolerance: 0.02
+
+  # soft: 2-3% of events arrive later than the 300s normal-delay ceiling.
+  # event time vs processing time, DDIA Ch 11.
+  - name: late_arrival_rate
+    severity: soft
+    query: |
+      SELECT
+        SUM(CASE WHEN unix_timestamp(ingestion_timestamp) - unix_timestamp(event_timestamp) > 300
+                 THEN 1 ELSE 0 END) / COUNT(*) AS observed
+      FROM bronze
+    expected: 0.025
+    tolerance: 0.01
