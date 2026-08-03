@@ -129,7 +129,7 @@ class LocalEnvironment(Environment):
     def delta_table(self, cfg, spark):
         from delta.tables import DeltaTable
         # Unmanaged Delta local: la tabla se direcciona por su path.
-        return DeltaTable.forPath(spark, self.bronze_path(cfg))
+        return DeltaTable.forPath(spark, f"{self.BRONZE_ROOT}/{cfg.name}")
 
 class DatabricksEnvironment(Environment):
     LANDING_ROOT = "/Volumes/workspace/telemetry/landing"
