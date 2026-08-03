@@ -316,6 +316,28 @@ All met 2026-07-31.
 - [X] PROGRESS.md records this section and the Free Edition landing-zone
       decision in the Log.
 
+## Week 4 exit criteria
+
+- [ ] Quality rules are declared per source in the YAML `quality_rules` block and
+      enforced by the framework with zero new code per rule. Adding a rule is
+      config, same thesis as ingestion.
+- [ ] Rules split by consequence, reusing the W1 acceptance layer: hard rules fail
+      the run loud (exact invariants, e.g. the drift boundary must be 0 before
+      drift_day); soft rules report expected-vs-observed and pass (statistical
+      fractions, e.g. late arrival rate, hot game_id share).
+- [ ] Rows that fail a hard row-level rule are quarantined to a rejects table, not
+      dropped and not crashed on. Bad data stays inspectable. Silent drop is the
+      anti-goal.
+- [ ] Each seeded defect maps to a declared rule that detects or bounds it,
+      producing the evidence line for its postmortem. A defect the framework
+      cannot see is logged as a gap, not hidden.
+- [ ] Checks run as a validation pass over Bronze (the Bronze -> Silver boundary)
+      and are idempotent: two runs produce identical pass/fail and quarantine
+      counts.
+- [ ] Verified locally against the full 50.5M with the Spark UI readable. No cloud
+      run required for W4.
+- [ ] PROGRESS.md records this section.
+
 ## Postmortems
 
 One page each: what I expected, what broke, how I diagnosed it, what I changed,
