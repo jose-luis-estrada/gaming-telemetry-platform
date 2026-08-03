@@ -22,9 +22,9 @@ dedup_key: [producer_id, source_sequence_number]
 
 # Used in W4.
 quality_rules:
-  # --- row-level rules: next session (quarantine to a rejects table) ---
-  # - { column: event_id, rule: not_null }
-  # - { column: event_timestamp, rule: not_null }
+  # --- row-level rules: evaluated per row, failures go to the rejects table ---
+  - { name: event_id_not_null,        type: row, column: event_id,        check: not_null }
+  - { name: event_timestamp_not_null, type: row, column: event_timestamp, check: not_null }
 
   # --- aggregate rules: this session (assert loud / report and pass) ---
   # hard: exact invariant. The drift key must not exist before drift_day.
