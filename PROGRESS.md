@@ -318,14 +318,14 @@ All met 2026-07-31.
 
 ## Week 4 exit criteria
 
-- [ ] Quality rules are declared per source in the YAML `quality_rules` block and
+- [X] Quality rules are declared per source in the YAML `quality_rules` block and
       enforced by the framework with zero new code per rule. Adding a rule is
       config, same thesis as ingestion.
 - [ ] Rules split by consequence, reusing the W1 acceptance layer: hard rules fail
       the run loud (exact invariants, e.g. the drift boundary must be 0 before
       drift_day); soft rules report expected-vs-observed and pass (statistical
       fractions, e.g. late arrival rate, hot game_id share).
-- [ ] Rows that fail a hard row-level rule are quarantined to a rejects table, not
+- [X] Rows that fail a hard row-level rule are quarantined to a rejects table, not
       dropped and not crashed on. Bad data stays inspectable. Silent drop is the
       anti-goal.
 - [ ] Each seeded defect maps to a declared rule that detects or bounds it,
@@ -349,7 +349,7 @@ what I would do differently at 100x scale. Written by hand, not drafted.
 | 2 | Small files | evidence gathered, not written | Tax lives in the LANDING: 102,056 files (10,211 in the cloud subset) at ~8 KB, 3,190 local tasks from the 4 MB openCostInBytes floor. Four taxed resources documented (compute, API, latency, disk slack). Reframed 2026-07-31: Bronze arrives packed (serverless optimizes the Autoloader write), so OPTIMIZE on Bronze moves 6 -> 4 files, not thousands. The story is where the tax is born (producer -> landing), the engine mitigating it in the write, and OPTIMIZE as the explicit lever. |
 | 3 | Duplicates | not started | 1% seeded, two flavors, 5 escaping the 3-day window. Survive into Bronze by design. |
 | 4 | Late-arriving data | not started | 2-3% up to 72h late, verified against manifest. |
-| 5 | Schema drift | not started | `network_type` key appears from drift_day 15. Boundary verified at 0 before. |
+| 5 | Schema drift | not started | `network_type` key appears from drift_day 15. Boundary verified at 0 before, now enforced as a hard quality rule (observed 0.0000). The hard/soft severity rationale (exact invariant vs sampled proportion) is the postmortem's core argument. |
 
 ## Open decisions
 
@@ -386,9 +386,6 @@ Not decisions, just unfinished chores. Each is small and each is verifiable.
       and find nothing until the Volume files are relocated. Do NOT run cloud
       until this is done. Relocating also invalidates the Autoloader checkpoint
       path implicitly, so confirm the checkpoint story after the move.
-- [ ] `.log` files (`upload.log`, `upload_17.log`) are in the repo root. Add
-      `*.log` to `.gitignore` and remove them from tracking; they can carry
-      account and Volume path identifiers.
 - [ ] `config.py` treats an empty-string field as missing (empty string is
       falsy), so `landing_path: ""` raised "missing required field". Worked
       around with `landing_path: "."`, which the resolver strips back to the
@@ -822,3 +819,33 @@ column becomes a YAML field or event_date is a platform contract all sources
 must carry.
 
 W3 exit criteria all met. Review session next before opening W4.
+
+### 2026-08-03
+
+Opened W4. Config-driven quality framework, two mechanisms landed.
+
+Aggregate rules: declared in player_events.yaml, run by the framework as plain
+SQL over a Bronze temp view, zero new code per rule. Split by consequence: hard
+asserts an exact invariant and fails loud, soft reports observed-vs-expected and
+passes within tolerance. Severity is dictated by the defect, not chosen: an exact
+invariant (drift key exists / does not exist) cannot carry tolerance without
+becoming a lie; a sampled proportion (hot game_id at 0.37 over 50M draws) cannot
+drop tolerance without becoming fragile. Verified on the full 50.5M:
+schema_drift_before_boundary 0.0000 (hard), hot_game_share 0.3700,
+late_arrival_rate 0.0250, all pass, all clavado on the manifest. Exact match is
+the W1 manifest-first methodology holding: generator wrote from the manifest, the
+framework reads the result and checks it against the same manifest.
+
+Row-level quarantine: row rules (type: row) split the DataFrame into clean and
+rejects rather than dropping or crashing. A reject keeps the full original row
+plus _reject_rule and _rejected_at and rides the W2 lineage columns, so it stays
+inspectable at 3 AM: which rule, when, which source file. Rule dispatch by type
+so the aggregate and row engines never collide. Verified on the clean 50.5M:
+clean + rejects = 50,500,000, rejects = 0. The split preserves every row and does
+not reject good data. Not yet shown: rejects > 0 against injected bad data, and
+persisting the rejects table to Delta. Next session.
+
+Fixed a latent bug while wiring the quality launcher: LocalEnvironment.delta_table
+called self.bronze_path(cfg), a method that never existed. delta_table had only
+run on Databricks (OPTIMIZE, W3), so the local path never executed until now.
+Resolved the same way write_bronze does. Committed separately from the framework.
