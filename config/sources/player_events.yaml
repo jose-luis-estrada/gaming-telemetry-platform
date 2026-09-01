@@ -30,6 +30,7 @@ quality_rules:
   # hard: exact invariant. The drift key must not exist before drift_day.
   # observed must be 0, not "close to 0", so this asserts and fails the run.
   - name: schema_drift_before_boundary
+    type: aggregate
     severity: hard
     query: |
       SELECT COUNT(*) AS observed
@@ -41,6 +42,7 @@ quality_rules:
   # soft: seeded skew. One game_id holds ~37% of events. Statistical, so report
   # expected-vs-observed and pass within tolerance.
   - name: hot_game_share
+    type: aggregate
     severity: soft
     query: |
       SELECT MAX(share) AS observed FROM (
@@ -53,6 +55,7 @@ quality_rules:
   # soft: 2-3% of events arrive later than the 300s normal-delay ceiling.
   # event time vs processing time, DDIA Ch 11.
   - name: late_arrival_rate
+    type: aggregate
     severity: soft
     query: |
       SELECT

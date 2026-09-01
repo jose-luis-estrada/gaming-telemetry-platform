@@ -321,22 +321,22 @@ All met 2026-07-31.
 - [X] Quality rules are declared per source in the YAML `quality_rules` block and
       enforced by the framework with zero new code per rule. Adding a rule is
       config, same thesis as ingestion.
-- [ ] Rules split by consequence, reusing the W1 acceptance layer: hard rules fail
+- [X] Rules split by consequence, reusing the W1 acceptance layer: hard rules fail
       the run loud (exact invariants, e.g. the drift boundary must be 0 before
       drift_day); soft rules report expected-vs-observed and pass (statistical
       fractions, e.g. late arrival rate, hot game_id share).
 - [X] Rows that fail a hard row-level rule are quarantined to a rejects table, not
       dropped and not crashed on. Bad data stays inspectable. Silent drop is the
       anti-goal.
-- [ ] Each seeded defect maps to a declared rule that detects or bounds it,
+- [X] Each seeded defect maps to a declared rule that detects or bounds it,
       producing the evidence line for its postmortem. A defect the framework
       cannot see is logged as a gap, not hidden.
-- [ ] Checks run as a validation pass over Bronze (the Bronze -> Silver boundary)
+- [X] Checks run as a validation pass over Bronze (the Bronze -> Silver boundary)
       and are idempotent: two runs produce identical pass/fail and quarantine
       counts.
-- [ ] Verified locally against the full 50.5M with the Spark UI readable. No cloud
+- [X] Verified locally against the full 50.5M with the Spark UI readable. No cloud
       run required for W4.
-- [ ] PROGRESS.md records this section.
+- [X] PROGRESS.md records this section.
 
 ## Postmortems
 
@@ -849,3 +849,43 @@ Fixed a latent bug while wiring the quality launcher: LocalEnvironment.delta_tab
 called self.bronze_path(cfg), a method that never existed. delta_table had only
 run on Databricks (OPTIMIZE, W3), so the local path never executed until now.
 Resolved the same way write_bronze does. Committed separately from the framework.
+
+### 2026-08-31
+
+Closed the W4 rejects demo: proved the quarantine CATCHES bad data, not just that
+it spares good data. Real Bronze is clean (rejects=0), so bad rows were derived
+from bronze_df (null event_id, null event_timestamp) and unioned back with
+unionByName, keeping the W2 lineage schema exact without hand-aligning columns.
+split_quarantine on the injected set: clean=4, rejects=6, total=10,
+clean+rejects==total. Nothing dropped, the W4 invariant held.
+
+The load-bearing row is the one with BOTH event_id and event_timestamp null: it
+tagged as event_id_not_null only, not twice. That is coalesce keeping the FIRST
+violated rule, so a row rejected by two rules reports one reason and is not
+duplicated across reasons. The YAML rule order (event_id first) is what decides
+the tag. groupBy confirmed event_id_not_null=4, event_timestamp_not_null=2.
+
+Persisted rejects to Delta at data/rejects/player_events with mode overwrite plus
+overwriteSchema (rejects carry _reject_rule and _rejected_at, columns Bronze does
+not have). Read-back from disk returned 6, and each reject carries _reject_rule,
+_rejected_at (this run), and the W2 _source_file. That is the 3 AM view: which
+rule, when, which file.
+
+Decision overwrite vs append: chose overwrite so the demo is idempotent (two runs,
+same count, no accumulation). A production rejects table would be append,
+partitioned by _rejected_at, each run writing its slice with replaceWhere so
+history accumulates but each run stays idempotent. History without duplication is
+the point. Logged as an interview talking point, not built.
+
+Loose end surfaced: split_quarantine takes run_id but never uses it (_rejected_at
+is current_timestamp()). Decide later whether to stamp a _run_id column on the
+rejects table or drop the dead parameter.
+
+The idempotency check first ran green over an EMPTY result set: run_quality_checks
+filters on type == "aggregate", but the three aggregate rules in the YAML had no
+type field (only the row rules did), so the filter skipped all three and returned
+[]. Two empty lists compare equal, so the assert passed without evaluating
+anything. Fix: declared type: aggregate explicitly on the three rules, matching
+the explicit dispatch split_quarantine already relies on. Rejected making "no
+type" default to aggregate: implicit dispatch is exactly what lets a malformed
+YAML pass as green. A test that can pass with zero cases evaluated is not a test.
