@@ -1,8 +1,8 @@
 # PROGRESS
 
-Ship date: 2026-09-03
-Current week: 3
-Hours logged: 41
+Ship date: 2026-09-30
+Current week: 5
+Hours logged: 50
 
 ## How to read this file
 
@@ -84,7 +84,7 @@ Items 1 through 3 are scaffolding.
 - [X] W1  Data generator
 - [X] W2  Ingestion framework, part 1
 - [X] W3  Ingestion framework, part 2
-- [ ] W4  Data quality framework
+- [X] W4  Data quality framework
 - [ ] W5  Skew and joins
 - [ ] W6  Gold, late data, lineage
 - [ ] W7  CI/CD, runbook
