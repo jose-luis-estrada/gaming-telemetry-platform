@@ -338,6 +338,33 @@ All met 2026-07-31.
       run required for W4.
 - [X] PROGRESS.md records this section.
 
+## Week 5 exit criteria
+
+- [ ] A Silver layer exists as the Bronze -> Silver boundary: one row per event,
+      deduplicated, driven by the source YAML with zero new code per source. Same
+      config-driven thesis as ingestion (W2/W3) and quality (W4).
+- [ ] Dedup resolves the two seeded duplicate flavors correctly: byte-identical
+      retries collapse to one row, and same-key corrections keep the corrected
+      version. Ordering is by producer sequence, never by wall clock: 3 producers,
+      3 clocks. DDIA Ch 8. Verified against the manifest's seeded counts.
+- [ ] The 3-day dedup window is bounded and the bound is visible: the 5 seeded
+      out-of-window duplicates SURVIVE dedup, and one query shows why (they fell
+      outside the window, not that dedup missed them).
+- [ ] The skew straggler is OBSERVED before it is fixed: the hot game_id (37% of
+      50M) produces a visible straggler / shuffle-partition imbalance in the local
+      Spark UI, with evidence captured (max vs median task time, or max partition
+      size). Postmortem #1 evidence, gathered not asserted.
+- [ ] The skew is then RESOLVED and the fix is measured before vs after on the
+      straggling stage. Whichever lever we pick (AQE, salting, or broadcasting to
+      skip the shuffle) is a defensible choice with the rejected one written down.
+      DDIA Ch 6.
+- [ ] Broadcast vs sort-merge join demonstrated and confirmed in the query plan,
+      not guessed: a fact-to-small-dimension join resolves to a broadcast (map-side)
+      join, a fact-to-fact join to a sort-merge (reduce-side) join. DDIA Ch 10.
+- [ ] Silver is idempotent: two consecutive runs produce identical Silver row counts.
+      Same discipline as W2/W3.
+- [ ] PROGRESS.md records this section.
+
 ## Postmortems
 
 One page each: what I expected, what broke, how I diagnosed it, what I changed,

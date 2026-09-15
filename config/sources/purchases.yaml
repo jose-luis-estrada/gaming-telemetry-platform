@@ -17,9 +17,17 @@ schema:
   - { name: price_usd, type: double }
   - { name: purchase_timestamp, type: timestamp }
  
-# Used in W5. A purchase is unique by its id, and there is a single producer
-# here, so there is no 3-clock problem to reconcile. Contrast player_events.
-dedup_key: [purchase_id]
+# Used in W5. Single producer, single clock: the deliberate CONTRAST to
+# player_events.
+#   identity_key: a purchase is unique by its id
+#   ordering_key: purchase_timestamp is a VALID order here because ONE producer
+#   means ONE clock, so wall-clock last-write-wins is legitimate. The moment you
+#   have N producers this breaks, which is exactly why player_events uses a
+#   sequence. DDIA Ch 8.
+identity_key: [purchase_id]
+ordering_key: [purchase_timestamp]
+# No dedup_window_hours: purchases has no late-arrival defect and no seeded
+# duplicates, so there is nothing to bound. Absent = unbounded, a no-op here.
  
 # Used in W4.
 quality_rules:

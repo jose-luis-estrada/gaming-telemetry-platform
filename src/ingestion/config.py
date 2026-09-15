@@ -20,14 +20,25 @@ class SourceConfig:
     format: str
     landing_path: str
     bronze_table: str
-    checkpoint_path: str    # NEW. Stable per-(source,target) dir; env resolves ther root
+    checkpoint_path: str    # Stable per-(source,target) dir; env resolves the root.
                             # Ignored locally (batch), THE idempotency mechanism on cloud.
     read_options: dict = field(default_factory=dict)
     # Declared, not acted on in Bronze. Schema-on-read: Bronze never enforces
-    # these, so a source can drift (new key mid-stream) without the ingest
-    # breaking. Enforcement is Silver's job. DDIA Ch 4.
+    # these, so a source can drift without the ingest breaking. Silver's job. DDIA Ch 4.
     schema: list = field(default_factory=list)
-    dedup_key: list = field(default_factory=list)   # used in W5
+    # W5 dedup contract. dedup is TWO questions, so TWO fields:
+    #   identity_key: which rows are the same logical record (collapse these)
+    #   ordering_key: which duplicate wins (keep the max on this key)
+    # Kept separate because they mean different things per source: for
+    # player_events the winner is a producer sequence, never a clock (3 producers,
+    # 3 clocks, DDIA Ch 8); for purchases one producer makes the wall clock a
+    # valid order. One dedup_key field hid that difference.
+    identity_key: list = field(default_factory=list)
+    ordering_key: list = field(default_factory=list)
+    # Bounded dedup window in hours. None = unbounded (fine for a source with no
+    # duplicates). For player_events it bounds reconciliation to recent history
+    # instead of reshuffling all of it every run. DDIA Ch 3.
+    dedup_window_hours: int | None = None
     quality_rules: list = field(default_factory=list)  # used in W4
 
 def load_source_config(path: str | Path) -> SourceConfig:

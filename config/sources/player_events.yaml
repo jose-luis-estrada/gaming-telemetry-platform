@@ -17,8 +17,22 @@ schema:
   - { name: metadata, type: string }
   - { name: stack_trace, type: string }
 
-# Used in W5. The dedup ordering key: 3 producers, 3 clocks. DDIA Ch 8.
-dedup_key: [producer_id, source_sequence_number]
+# Used in W5. Dedup is TWO questions, kept as two fields on purpose:
+#   identity_key: which rows are the SAME event (collapse these to one)
+#   ordering_key: which duplicate WINS (keep the max on this key)
+# Conflating them into one dedup_key hid that they mean different things per
+# source. Here the winner is the producer's own counter, NEVER a wall clock:
+# 3 producers = 3 clocks, so a MAX(timestamp) picks a random clock's noise.
+# DDIA Ch 8.
+identity_key: [event_id]
+ordering_key: [producer_id, source_sequence_number]
+
+# Bounded dedup window. Only reconcile duplicates within this many hours of each
+# other, derived from the 72h max lateness. Global dedup would reshuffle all
+# history every run (DDIA Ch 3). MUST equal manifest duplicates.dedup_window_hours
+# or the 5 seeded out-of-window dups stop being out-of-window and the W5
+# survival test breaks. That coupling is the point, not an accident.
+dedup_window_hours: 72
 
 # Used in W4.
 quality_rules:
