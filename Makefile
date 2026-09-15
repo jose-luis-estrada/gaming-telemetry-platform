@@ -20,3 +20,6 @@ verify-repro:
 
 ingest:
 	python -m src.ingestion.run
+
+silver:
+	python -m src.ingestion.run_silver

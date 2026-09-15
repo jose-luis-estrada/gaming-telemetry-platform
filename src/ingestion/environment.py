@@ -14,8 +14,8 @@ from src.ingestion.config import SourceConfig
 
 
 class Environment:
-    """Strategy base. Each subclass owns the three things that differ by
-    environment: the Spark session, the landing root, and the terminal write verb."""
+    """Strategy base. Each subclass owns the things that differ by environment:
+    the Spark session, the landing/bronze/silver roots, and the terminal write verbs."""
 
     def __init__(self):
         self._spark = None
@@ -31,18 +31,12 @@ class Environment:
             self._spark.stop()
 
     def landing_uri(self, cfg: SourceConfig) -> str:
-        # cfg.landing_path is now RELATIVE to the landing root ("" for a source
-        # that sits flat at the root, like player_events today). Same value in
-        # both environments; only the root differs.
+        # cfg.landing_path is RELATIVE to the landing root ("" for a source that
+        # sits flat at the root). Same value in both environments; only the root
+        # differs.
         root = self._landing_root()
         rel = (cfg.landing_path or "").strip("/.")
         return f"{root}/{rel}" if rel else root
-
-    def _build_spark(self) -> SparkSession:
-        raise NotImplementedError
-
-    def _landing_root(self) -> str:
-        raise NotImplementedError
 
     def checkpoint_uri(self, cfg: SourceConfig) -> str:
         # Same shape as landing_uri: stable logical name in the YAML, physical
@@ -50,6 +44,14 @@ class Environment:
         root = self._checkpoint_root()
         rel = (cfg.checkpoint_path or "").strip("/.")
         return f"{root}/{rel}" if rel else root
+
+    # --- things every subclass MUST provide (abstract) ---
+
+    def _build_spark(self) -> SparkSession:
+        raise NotImplementedError
+
+    def _landing_root(self) -> str:
+        raise NotImplementedError
 
     def _checkpoint_root(self) -> str:
         raise NotImplementedError
@@ -61,20 +63,34 @@ class Environment:
         raise NotImplementedError
 
     def write_bronze(self, df, cfg: SourceConfig, checkpoint_uri: str) -> int:
-        # Was write_bronze(writer, cfg). Now owns the WHOLE write, because a batch
-        # writer and a stream writer share no terminal verb. Returns the read-back
-        # table count, which is the number that must be stable across two runs.
+        # Owns the WHOLE write, because a batch writer and a stream writer share no
+        # terminal verb. Returns the read-back table count, the number that must be
+        # stable across two runs.
+        raise NotImplementedError
+
+    def write_silver(self, df, cfg: SourceConfig) -> int:
+        # Terminal write for Silver, same split as write_bronze: unmanaged path
+        # local, managed UC table on cloud. No checkpoint arg: Silver reads a
+        # bounded Bronze table, not an unbounded landing stream. Returns the
+        # read-back count, which must be stable across two runs.
         raise NotImplementedError
 
     def source_file_col(self):
         # Column expression that identifies the source file per row. The two
-        # environments expose this through different APIs, so the difference
-        # lives here, not in bronze.py. This keeps add_lineage identical in both.
+        # environments expose this through different APIs, so the difference lives
+        # here, not in bronze.py. This keeps add_lineage identical in both.
         raise NotImplementedError
+
+    def delta_table(self, cfg: SourceConfig, spark):
+        # Addresses the Bronze Delta table: by path locally, by UC name on cloud.
+        # Used by optimize.py, quality.py, and now silver.py to read Bronze back.
+        raise NotImplementedError
+
 
 class LocalEnvironment(Environment):
     LANDING_ROOT = "data/landing"
     BRONZE_ROOT = "data/bronze"
+    SILVER_ROOT = "data/silver"
     CHECKPOINT_ROOT = "data/checkpoints"
 
     def _build_spark(self) -> SparkSession:
@@ -120,6 +136,16 @@ class LocalEnvironment(Environment):
         # and avoids recomputing the whole lazy pipeline.
         return self.spark().read.format("delta").load(path).count()
 
+    def write_silver(self, df, cfg: SourceConfig) -> int:
+        path = f"{self.SILVER_ROOT}/{cfg.name}"
+        # overwrite: Silver is a full rebuild from Bronze every run, so overwrite
+        # IS idempotency here (unlike Bronze, where it was the temporary W2 hack).
+        # A rebuilt-from-source table has no history to preserve.
+        (df.write.format("delta").mode("overwrite")
+            .partitionBy("event_date").option("overwriteSchema", "true")
+            .save(path))
+        return self.spark().read.format("delta").load(path).count()
+
     def source_file_col(self):
         from pyspark.sql import functions as F
         # Legacy Spark API. Works locally; Unity Catalog blocks it (UC_COMMAND_
@@ -130,6 +156,7 @@ class LocalEnvironment(Environment):
         from delta.tables import DeltaTable
         # Unmanaged Delta local: la tabla se direcciona por su path.
         return DeltaTable.forPath(spark, f"{self.BRONZE_ROOT}/{cfg.name}")
+
 
 class DatabricksEnvironment(Environment):
     LANDING_ROOT = "/Volumes/workspace/telemetry/landing"
@@ -206,6 +233,16 @@ class DatabricksEnvironment(Environment):
         # unbounded, it throws), and the total table is what must be stable across runs.
         return self.spark().read.table(table).count()
 
+    def write_silver(self, df, cfg: SourceConfig) -> int:
+        table = f"{self.UC_SCHEMA}.silver_{cfg.name}"
+        # Batch overwrite, NOT Autoloader: Silver reads a bounded Bronze table, not
+        # an unbounded landing stream. saveAsTable registers it managed in UC, which
+        # is what earns the cataloging/lineage line for Silver too.
+        (df.write.format("delta").mode("overwrite")
+            .partitionBy("event_date").option("overwriteSchema", "true")
+            .saveAsTable(table))
+        return self.spark().read.table(table).count()
+
     def source_file_col(self):
         from pyspark.sql import functions as F
         # UC-governed metadata column. Stable across any file read; the
@@ -215,7 +252,8 @@ class DatabricksEnvironment(Environment):
     def delta_table(self, cfg, spark):
         from delta.tables import DeltaTable
         # Managed UC table: se direcciona por catalog.schema.name.
-        return DeltaTable.forName(spark, self.bronze_target(cfg))
+        return DeltaTable.forName(spark, f"{self.UC_SCHEMA}.bronze_{cfg.name}")
+
 
 def get_environment() -> Environment:
     # The single surviving conditional, read once at the edge. Everything
