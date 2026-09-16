@@ -85,7 +85,7 @@ Items 1 through 3 are scaffolding.
 - [X] W2  Ingestion framework, part 1
 - [X] W3  Ingestion framework, part 2
 - [X] W4  Data quality framework
-- [ ] W5  Skew and joins
+- [X] W5  Skew and joins
 - [ ] W6  Gold, late data, lineage
 - [ ] W7  CI/CD, runbook
 - [ ] W8  README, diagrams, mock interview
