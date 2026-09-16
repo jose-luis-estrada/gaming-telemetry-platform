@@ -1,8 +1,8 @@
 # PROGRESS
 
 Ship date: 2026-09-30
-Current week: 5
-Hours logged: 50
+Current week: 6
+Hours logged: 60
 
 ## How to read this file
 
@@ -340,30 +340,30 @@ All met 2026-07-31.
 
 ## Week 5 exit criteria
 
-- [ ] A Silver layer exists as the Bronze -> Silver boundary: one row per event,
+- [X] A Silver layer exists as the Bronze -> Silver boundary: one row per event,
       deduplicated, driven by the source YAML with zero new code per source. Same
       config-driven thesis as ingestion (W2/W3) and quality (W4).
-- [ ] Dedup resolves the two seeded duplicate flavors correctly: byte-identical
+- [X] Dedup resolves the two seeded duplicate flavors correctly: byte-identical
       retries collapse to one row, and same-key corrections keep the corrected
       version. Ordering is by producer sequence, never by wall clock: 3 producers,
       3 clocks. DDIA Ch 8. Verified against the manifest's seeded counts.
-- [ ] The 3-day dedup window is bounded and the bound is visible: the 5 seeded
+- [X] The 3-day dedup window is bounded and the bound is visible: the 5 seeded
       out-of-window duplicates SURVIVE dedup, and one query shows why (they fell
       outside the window, not that dedup missed them).
-- [ ] The skew straggler is OBSERVED before it is fixed: the hot game_id (37% of
+- [X] The skew straggler is OBSERVED before it is fixed: the hot game_id (37% of
       50M) produces a visible straggler / shuffle-partition imbalance in the local
       Spark UI, with evidence captured (max vs median task time, or max partition
       size). Postmortem #1 evidence, gathered not asserted.
-- [ ] The skew is then RESOLVED and the fix is measured before vs after on the
+- [X] The skew is then RESOLVED and the fix is measured before vs after on the
       straggling stage. Whichever lever we pick (AQE, salting, or broadcasting to
       skip the shuffle) is a defensible choice with the rejected one written down.
       DDIA Ch 6.
-- [ ] Broadcast vs sort-merge join demonstrated and confirmed in the query plan,
+- [X] Broadcast vs sort-merge join demonstrated and confirmed in the query plan,
       not guessed: a fact-to-small-dimension join resolves to a broadcast (map-side)
       join, a fact-to-fact join to a sort-merge (reduce-side) join. DDIA Ch 10.
-- [ ] Silver is idempotent: two consecutive runs produce identical Silver row counts.
+- [X] Silver is idempotent: two consecutive runs produce identical Silver row counts.
       Same discipline as W2/W3.
-- [ ] PROGRESS.md records this section.
+- [X] PROGRESS.md records this section.
 
 ## Postmortems
 
@@ -916,3 +916,55 @@ anything. Fix: declared type: aggregate explicitly on the three rules, matching
 the explicit dispatch split_quarantine already relies on. Rejected making "no
 type" default to aggregate: implicit dispatch is exactly what lets a malformed
 YAML pass as green. A test that can pass with zero cases evaluated is not a test.
+
+### 2026-09-15
+
+Closed W5. Silver, skew, joins.
+
+Silver dedup contract split: dedup_key was one field meaning two things, so it
+became identity_key (which rows are the same event) and ordering_key (which
+duplicate wins), plus dedup_window_hours on the contract. player_events orders on
+the producer sequence (3 producers, 3 clocks, never a wall clock, DDIA Ch 8);
+purchases orders on purchase_timestamp because one producer means one clock, the
+deliberate contrast. silver.py dedups with row_number over the identity group
+(not rank: rank keeps both rows of a byte-identical tie, the opposite of dedup)
+behind the environment seam. within_dedup_window splits on ingestion_timestamp
+anchored to the batch max, not now(), so the split is reproducible and Silver
+stays idempotent. Four unit tests, the load-bearing one being out-of-window
+survival. run_silver.py mirrors run.py; make silver added.
+
+Skew, the postmortem #1 evidence. Rule 3 held: observed before fixed. A count()
+showed nothing because groupBy(count) is additive and Spark pre-aggregates
+map-side (the combiner): Shuffle Write was flat at 4 records per task across all
+1265 tasks, the 18.6M hot key never traveled. A join keyed on game_id cannot
+pre-aggregate, so it forced the skew into the open: game_id=1 landed 18,686,484
+records in ONE reduce task, Duration Max 5s vs Median 5ms, 374 MiB spill. That
+contrast (invisible under aggregation, catastrophic under join) IS the postmortem.
+
+AQE skew join was tried and did NOT apply, logged as a finding not a failure. AQE
+judges skew in bytes, and the hot partition is only ~1.9 MiB compressed despite
+18.6M rows, far under the 256 MB default. Even lowering
+skewedPartitionThresholdInBytes to 1m and skewedPartitionFactor to 1.5, AQE
+coalesced to 4 tasks and never split: with 4 non-empty partitions there is nothing
+to coalesce cleanly and the median is contaminated by the hot partition itself.
+AQE is built for GB-scale skew; this is MB-scale. The honest interview answer.
+
+Salting (N=8) is the fix that landed. A random salt in [0,8) on the big side
+turns game_id=1 into 8 shuffle keys; the 4-row dim is replicated 8 times (explode
+over [0..8)) so each salted row still matches. Join on (game_id, salt), drop salt.
+Max Shuffle Read 18,686,484 -> 3,662,918 (~5x, not exactly 8x because rand() is
+not perfectly uniform), spill per task 374 -> 100 MiB. Duration only 5s -> 3s
+because at 5.3 MiB total shuffle the clock is dominated by fixed overhead, not
+data; the load-bearing number is shuffle read per task, which in production with
+real GB would track duration far more closely. Salt tax noted: replicating a
+LARGE dim x N is why you salt only the hot key in prod; here the dim is 4 rows so
+salting everything is free and reads cleaner. DDIA Ch 6.
+
+Joins confirmed in the plan, not guessed. fact JOIN 4-row dim -> BroadcastHashJoin
+(map-side, no shuffle of the 50M side, DDIA Ch 10); fact JOIN fact on player_id ->
+SortMergeJoin with an Exchange on both sides. Forcing autoBroadcastJoinThreshold
+to -1 flips the dim join to SortMergeJoin, proving the planner chooses on SIZE,
+a cost decision, not a property of the data.
+
+Postmortem #1 (skew) evidence now complete: the observed straggler, the AQE
+non-application, and the salting before/after. Still to write by hand.

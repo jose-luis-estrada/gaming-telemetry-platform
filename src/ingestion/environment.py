@@ -103,6 +103,11 @@ class LocalEnvironment(Environment):
         builder = (
             SparkSession.builder.appName("bronze-ingest-local")
             .master("local[*]")
+            # Local driver heap. Default ~1GB is too small for a 50M-group window
+            # sort (Silver dedup): row_number over 50M distinct event_ids spills
+            # and then OOMs the default heap. 6g fits it on this Mac. This is a
+            # LOCAL-only knob: on a cluster the window distributes across executors.
+            .config("spark.driver.memory", "6g")
             .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
             .config(
                 "spark.sql.catalog.spark_catalog",
