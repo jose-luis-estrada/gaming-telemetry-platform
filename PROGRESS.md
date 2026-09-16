@@ -361,8 +361,9 @@ All met 2026-07-31.
 - [X] Broadcast vs sort-merge join demonstrated and confirmed in the query plan,
       not guessed: a fact-to-small-dimension join resolves to a broadcast (map-side)
       join, a fact-to-fact join to a sort-merge (reduce-side) join. DDIA Ch 10.
-- [X] Silver is idempotent: two consecutive runs produce identical Silver row counts.
-      Same discipline as W2/W3.
+- [X] Silver is idempotent: overwrite rebuild from a fixed Bronze, two runs give
+      identical Silver row counts (player_events 50,000,005 = 50M distinct + 5
+      seeded out-of-window escapees; purchases 150,000). Same discipline as W2/W3.
 - [X] PROGRESS.md records this section.
 
 ## Postmortems
@@ -919,52 +920,77 @@ YAML pass as green. A test that can pass with zero cases evaluated is not a test
 
 ### 2026-09-15
 
-Closed W5. Silver, skew, joins.
+Closed W5. Silver, skew, joins. Two silent bugs caught along the way, both the
+kind this project exists to expose: green run, plausible wrong number.
 
-Silver dedup contract split: dedup_key was one field meaning two things, so it
-became identity_key (which rows are the same event) and ordering_key (which
-duplicate wins), plus dedup_window_hours on the contract. player_events orders on
-the producer sequence (3 producers, 3 clocks, never a wall clock, DDIA Ch 8);
-purchases orders on purchase_timestamp because one producer means one clock, the
-deliberate contrast. silver.py dedups with row_number over the identity group
-(not rank: rank keeps both rows of a byte-identical tie, the opposite of dedup)
-behind the environment seam. within_dedup_window splits on ingestion_timestamp
-anchored to the batch max, not now(), so the split is reproducible and Silver
-stays idempotent. Four unit tests, the load-bearing one being out-of-window
-survival. run_silver.py mirrors run.py; make silver added.
+Silver dedup contract split: dedup_key was one field meaning two things, now
+identity_key (which rows are the same event) and ordering_key (which duplicate
+wins), plus dedup_window_hours. player_events orders on the producer sequence
+(3 producers, 3 clocks, never a wall clock, DDIA Ch 8); purchases orders on
+purchase_timestamp because one producer means one clock, the deliberate contrast.
+silver.py dedups with row_number over the identity group (not rank: rank keeps
+both rows of a byte-identical tie) behind the environment seam. run_silver.py
+mirrors run.py; make silver added. Four unit tests, the load-bearing one being
+out-of-window survival.
 
-Skew, the postmortem #1 evidence. Rule 3 held: observed before fixed. A count()
-showed nothing because groupBy(count) is additive and Spark pre-aggregates
-map-side (the combiner): Shuffle Write was flat at 4 records per task across all
-1265 tasks, the 18.6M hot key never traveled. A join keyed on game_id cannot
-pre-aggregate, so it forced the skew into the open: game_id=1 landed 18,686,484
-records in ONE reduce task, Duration Max 5s vs Median 5ms, 374 MiB spill. That
-contrast (invisible under aggregation, catastrophic under join) IS the postmortem.
+BUG 1, dedup window mis-anchored. First make silver left 499,106 of 500,000
+seeded duplicates alive (Silver 50,499,106, should be ~50M). Diagnosed by
+counting: Bronze 50,500,000 rows, 50,000,000 distinct event_id, so exactly
+500,000 duplicate rows, the seeded 1%. within_dedup_window had anchored the
+window to the batch MAX ingestion (day 30), so with a 72h window only the last
+3 days were deduplicated and 27 days passed through untouched. The window is a
+distance BETWEEN two copies of one identity, not a recency cutoff on the batch.
+Fixed to anchor on the per-identity MIN ingestion (the original) and measure each
+copy against it. After: Silver 50,000,005 = 50M distinct + the 5 seeded
+out-of-window escapees that survive by design. That +5 IS the bounded guarantee
+made a number; a global dedup would have given exactly 50M and erased the proof.
 
-AQE skew join was tried and did NOT apply, logged as a finding not a failure. AQE
-judges skew in bytes, and the hot partition is only ~1.9 MiB compressed despite
-18.6M rows, far under the 256 MB default. Even lowering
-skewedPartitionThresholdInBytes to 1m and skewedPartitionFactor to 1.5, AQE
-coalesced to 4 tasks and never split: with 4 non-empty partitions there is nothing
-to coalesce cleanly and the median is contaminated by the hot partition itself.
-AQE is built for GB-scale skew; this is MB-scale. The honest interview answer.
+BUG 2, local heap OOM on the 50M-group window. The fixed dedup then OOMed:
+WindowExec -> UnsafeExternalSorter -> Java heap space. row_number over 50M
+distinct event_ids is a per-partition sort that does not fit the default ~1GB
+driver heap. Not a logic bug, a local-scale limit: raised spark.driver.memory to
+6g in LocalEnvironment (a LOCAL-only knob; on a cluster the window distributes
+across executors). make silver then landed 50,000,005. Note for postmortem: at
+100x this window is a candidate to rewrite as a groupByKey reduction to cut sort
+memory pressure; kept as-is here because the count is correct and the fix is
+one config line.
+
+Skew, postmortem #1 evidence. Rule 3 held: observed before fixed. A count()
+showed NOTHING because groupBy(count) is additive and Spark pre-aggregates
+map-side (the combiner): Shuffle Write flat at 4 records per task across all 1265
+tasks, the 18.6M hot key never traveled. A join keyed on game_id cannot
+pre-aggregate, forcing it into the open: game_id=1 landed 18,686,484 records in
+ONE reduce task, Duration Max 5s vs Median 5ms, 374 MiB spill. That contrast
+(invisible under aggregation, catastrophic under join) IS the postmortem.
+
+AQE skew join was tried and did NOT apply, logged as a finding. AQE judges skew
+in BYTES; the hot partition is ~1.9 MiB compressed despite 18.6M rows, far under
+the 256 MB default. Even at skewedPartitionThresholdInBytes 1m and factor 1.5 it
+coalesced to 4 tasks without splitting: with 4 non-empty partitions the median is
+contaminated by the hot partition itself. AQE is built for GB-scale skew; this is
+MB-scale. The honest interview answer.
 
 Salting (N=8) is the fix that landed. A random salt in [0,8) on the big side
-turns game_id=1 into 8 shuffle keys; the 4-row dim is replicated 8 times (explode
-over [0..8)) so each salted row still matches. Join on (game_id, salt), drop salt.
-Max Shuffle Read 18,686,484 -> 3,662,918 (~5x, not exactly 8x because rand() is
-not perfectly uniform), spill per task 374 -> 100 MiB. Duration only 5s -> 3s
-because at 5.3 MiB total shuffle the clock is dominated by fixed overhead, not
-data; the load-bearing number is shuffle read per task, which in production with
-real GB would track duration far more closely. Salt tax noted: replicating a
-LARGE dim x N is why you salt only the hot key in prod; here the dim is 4 rows so
-salting everything is free and reads cleaner. DDIA Ch 6.
+turns game_id=1 into 8 shuffle keys; the 4-row dim is replicated 8x (explode over
+[0..8)) so each salted row still matches. Join on (game_id, salt), drop salt. Max
+Shuffle Read 18,686,484 -> 3,662,918 (~5x, not exactly 8x because rand() is not
+perfectly uniform), spill per task 374 -> 100 MiB. Duration only 5s -> 3s because
+at 5.3 MiB total shuffle the clock is dominated by fixed overhead, not data; the
+load-bearing number is shuffle read per task, which at real GB scale would track
+duration far more closely. Salt tax noted: replicating a LARGE dim x N is why you
+salt only the hot key in prod; here the dim is 4 rows so salting all is free. Ch 6.
 
-Joins confirmed in the plan, not guessed. fact JOIN 4-row dim -> BroadcastHashJoin
-(map-side, no shuffle of the 50M side, DDIA Ch 10); fact JOIN fact on player_id ->
-SortMergeJoin with an Exchange on both sides. Forcing autoBroadcastJoinThreshold
-to -1 flips the dim join to SortMergeJoin, proving the planner chooses on SIZE,
-a cost decision, not a property of the data.
+Joins confirmed in the plan, not guessed, and two subtleties surfaced. (1)
+purchases is only 150K rows, so a fact-JOIN-purchases plan comes out
+BroadcastHashJoin, not sort-merge: to demonstrate a genuine reduce-side join both
+sides must be large, so used a self-join of the 50M table on player_id ->
+SortMergeJoin with an Exchange on both sides. (2) .explain() with AQE on prints
+the PRE-runtime plan (isFinalPlan=false), where the static planner lacks size
+stats for the Delta scan and defaults to sort-merge; AQE would flip it to
+broadcast at runtime but explain does not run. Turning AQE off (final plan) plus
+an explicit F.broadcast() hint made the BroadcastHashJoin visible. Forcing
+autoBroadcastJoinThreshold to -1 flips the tiny-dim join back to SortMergeJoin,
+proving the planner chooses on SIZE, a cost decision, not a data property. Ch 10.
 
-Postmortem #1 (skew) evidence now complete: the observed straggler, the AQE
-non-application, and the salting before/after. Still to write by hand.
+Postmortem #1 (skew) evidence now complete: observed straggler, AQE
+non-application, salting before/after. Still to write by hand.
