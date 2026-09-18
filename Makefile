@@ -23,3 +23,6 @@ ingest:
 
 silver:
 	python -m src.ingestion.run_silver
+
+gold:
+	python -m src.ingestion.run_gold

@@ -366,6 +366,61 @@ All met 2026-07-31.
       seeded out-of-window escapees; purchases 150,000). Same discipline as W2/W3.
 - [X] PROGRESS.md records this section.
 
+## Week 6 exit criteria
+
+- [ ] A Gold layer exists as the Silver -> Gold boundary: three business tables,
+      each built from Silver, each a named consumer of the platform. Gold is where
+      the config-driven thesis deliberately STOPS: Bronze and Silver are declared
+      in YAML, Gold aggregates are bespoke business logic. The stop is a decision
+      with a reason (a generic aggregate DSL was the rejected option: it buys
+      nothing for three tables and costs defensibility), not an omission.
+- [ ] The tables are fixed at three, each with a distinct grain and a distinct
+      reason to exist: player_daily (one row per player per event_date,
+      engagement), game_health_daily (one row per game_id per event_date, crash
+      rate from the semi/unstructured crash source), and revenue_daily (one row
+      per item_category per purchase_date, from the purchases source onboarded in
+      W3). purchases has no game_id and no late-arrival defect, so revenue_daily is
+      the clean baseline: the late-data horizon machinery lives only in the two
+      player_events tables. Three grains, three source shapes, no fourth table.
+- [ ] Gold is partitioned on event_date and the choice is defended in one query:
+      Gold is small (aggregates, not raw events), so the partition exists for
+      incremental late-data rewrite, not for scan pruning of a large table. This is
+      a different reason from Bronze/Silver, and the difference is stated. DDIA Ch 6.
+- [ ] Late-arriving data is handled at Gold, not hidden: a late event lands in an
+      already-closed event_date (event time, not processing time, DDIA Ch 11) and
+      the Gold aggregate for exactly that date is recomputed with replaceWhere on
+      the event_date partition, never a full-table recompute. Blast radius is
+      measured: N within-horizon late events touch M partitions, and only those M
+      partitions are rewritten (tx log numRemovedFiles / numAddedFiles scoped to
+      those dates).
+- [ ] The correction is CORRECT, not just bounded: for a partition that received
+      late events within the 48h horizon, the Gold count before reprocessing is
+      wrong-low, and after reprocessing it matches Silver restricted to
+      within-horizon arrivals for that date. The seeded 48-to-72h stragglers land
+      in gold.late_after_close, not in Gold: nothing dropped, Gold frozen once the
+      horizon passes. One query shows both populations. Late-arrivals postmortem
+      evidence, gathered not asserted.
+- [ ] The 48h horizon is an explicit decision with its cost written down: Gold is
+      correct for a date only for arrivals within 48h of that date, then the
+      partition freezes. Past-horizon arrivals are neither dropped nor merged, they
+      accumulate in gold.late_after_close. This trades bounded staleness for bounded
+      rewrite cost: without a horizon any partition could be rewritten forever. The
+      48h cut, below the seeded 72h max, is what keeps late_after_close non-empty
+      and the trade-off demonstrable. DDIA Ch 11.
+- [ ] Gold is idempotent: rebuilt from a fixed Silver, two runs give identical Gold
+      row counts on all three tables. A late-data reprocess followed by a second
+      identical reprocess also does not change counts (reprocessing is itself
+      idempotent, not only the clean build). Definition of done item 2.
+- [ ] Unity Catalog lineage is visible in the Databricks demo: the three Gold
+      tables are registered in workspace.telemetry and the catalog shows the
+      Bronze -> Silver -> Gold dependency graph. This is the cloud-only criterion
+      (UC does not exist locally) and it maps directly to the JD cataloging,
+      lineage, and metadata requirement. Verified in the lineage view, not asserted.
+- [ ] PROGRESS.md records this section and, as settled decisions: the three-table
+      Gold set, replaceWhere as the late-data rewrite mechanism, the 48h horizon
+      with gold.late_after_close for past-horizon arrivals, and config-driven
+      stops-at-Gold. Each with its rejected alternative.
+
 ## Postmortems
 
 One page each: what I expected, what broke, how I diagnosed it, what I changed,
@@ -994,3 +1049,18 @@ proving the planner chooses on SIZE, a cost decision, not a data property. Ch 10
 
 Postmortem #1 (skew) evidence now complete: observed straggler, AQE
 non-application, salting before/after. Still to write by hand.
+
+### 2026-09-18
+
+Opened W6. Clean Silver->Gold build: three tables, gold.py (pure builders) +
+run_gold.py, `make gold`. player_daily 570, game_health_daily 120, revenue_daily
+20, idempotent across runs.
+
+Caught a phantom partition on the first run: Gold had 31 distinct event_dates,
+Silver has 30. Cause was re-deriving the partition key with to_date(event_
+timestamp) instead of using Silver's canonical event_date column. The generator's
+day bucket is offset from midnight, so a bucket straddles a calendar boundary and
+to_date splits the last one into a nonexistent day 31. Divisibility gave it away:
+589 = 19x31, 124 = 4x31. Fixed by grouping on Silver's event_date. One boundary,
+one definition, or replaceWhere selects different rows per layer in W6. DDIA Ch 11.
+Late-arrivals postmortem material: first time the event-time boundary bit.
