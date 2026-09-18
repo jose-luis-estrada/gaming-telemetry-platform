@@ -119,3 +119,25 @@ def past_horizon(events: DataFrame, horizon_hours: int = HORIZON_HOURS) -> DataF
     # = all Silver, the same clean+rejects=total invariant as W4. _lateness_hours is
     # kept as the evidence of why each row was diverted.
     return add_lateness(events).where(F.col("_lateness_hours") > horizon_hours)
+
+# ----------------------------
+# late-data reprocessing (W6)
+# ----------------------------
+# replaceWhere: an atomic overwrite scoped to a partition predicate. It rewrites
+# only rows matching the predicate and leaves every other partition's files
+# untouched, so a late batch reprocesses one event_date at O(partition), not the
+# whole table at O(table). This is the update path; the clean build is the insert
+# path. DDIA Ch 3 (the tx log makes the swap atomic and auditable).
+
+def reprocess_partition(gold_df: DataFrame, path: str, event_date: str) -> None:
+    # gold_df is the RECOMPUTED aggregate for one date, already filtered to that
+    # date upstream. The predicate string must match the partition exactly: a
+    # wider predicate rewrites more than intended, a narrower one appends a
+    # duplicate. event_date is a DATE column, so the literal is quoted date text.
+    (
+        gold_df.write
+        .format("delta")
+        .mode("overwrite")
+        .option("replaceWhere", f"event_date = '{event_date}'")
+        .save(path)
+    )
