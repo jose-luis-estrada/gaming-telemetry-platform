@@ -11,6 +11,8 @@ from src.ingestion.gold import (
     build_game_health_daily,
     build_revenue_daily,
     write_gold,
+    within_horizon,
+    past_horizon,
 )
 
 # Local Delta session. If Bronze/Silver already give you a session helper, use it
@@ -37,9 +39,41 @@ events = spark.read.format("delta").load(SILVER_PLAYER_EVENTS)
 purchases = spark.read.format("delta").load(SILVER_PURCHASES)
 
 # %%
-write_gold(build_player_daily(events), GOLD_PLAYER_DAILY, "event_date")
-write_gold(build_game_health_daily(events), GOLD_GAME_HEALTH_DAILY, "event_date")
+# Gold is built from within-horizon events only: on-time plus late-but-within-48h.
+# Past-horizon stragglers are excluded here and routed to late_after_close below, so
+# a frozen partition never absorbs a straggler. purchases has no late defect, so it
+# is aggregated whole.
+eligible = within_horizon(events)
+
+write_gold(build_player_daily(eligible), GOLD_PLAYER_DAILY, "event_date")
+write_gold(build_game_health_daily(eligible), GOLD_GAME_HEALTH_DAILY, "event_date")
 write_gold(build_revenue_daily(purchases), GOLD_REVENUE_DAILY, "purchase_date")
+
+# %%
+# Past-horizon stragglers go to late_after_close: inspectable, partitioned by the
+# event_date they belong to, carrying _lateness_hours as the reason. Overwrite for
+# idempotency (two runs, same rows), same choice as the W4 rejects table. Only
+# player_events feeds this: purchases has no late-arrival defect.
+GOLD_LATE_AFTER_CLOSE = "data/gold/late_after_close"
+stragglers = past_horizon(events)
+(
+    stragglers.write
+    .format("delta")
+    .mode("overwrite")
+    .partitionBy("event_date")
+    .save(GOLD_LATE_AFTER_CLOSE)
+)
+
+# %%
+# Nothing dropped: within_horizon + past_horizon must equal all of Silver. The
+# clean+rejects=total invariant from W4, restated at the horizon boundary.
+n_eligible = eligible.count()
+n_straggler = stragglers.count()
+n_total = events.count()
+print("within horizon:", n_eligible)
+print("past horizon (late_after_close):", n_straggler)
+print("total silver:", n_total)
+assert n_eligible + n_straggler == n_total, "horizon split lost or duplicated rows"
 
 # %%
 # Row counts are the first idempotency signal: re-running the three writes must

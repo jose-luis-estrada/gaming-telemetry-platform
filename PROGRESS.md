@@ -1064,3 +1064,11 @@ to_date splits the last one into a nonexistent day 31. Divisibility gave it away
 589 = 19x31, 124 = 4x31. Fixed by grouping on Silver's event_date. One boundary,
 one definition, or replaceWhere selects different rows per layer in W6. DDIA Ch 11.
 Late-arrivals postmortem material: first time the event-time boundary bit.
+
+Horizon split landed. Gold built from within-horizon events only; past-horizon
+stragglers (48-72h) routed to gold.late_after_close, never into Gold. Invariant
+within_horizon + past_horizon = total holds: 49,583,401 + 416,604 = 50,000,005.
+late_after_close = 416,604, non-empty as designed (~1/3 of the ~1M seeded late
+arrivals, the 48-72h band; slightly above 1/3 because lateness starts at 300s not
+0). Gold unchanged at 570/120/20. Horizon = 48h, below the seeded 72h max, is what
+keeps the band demonstrable. DDIA Ch 11.

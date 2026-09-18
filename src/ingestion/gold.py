@@ -86,3 +86,36 @@ def write_gold(df: DataFrame, path: str, partition_col: str) -> None:
         .partitionBy(partition_col)
         .save(path)
     )
+
+# ----------------------------
+# late-data horizon (W6)
+# ----------------------------
+# Settled: corrections are accepted within 48h of an event's own event time, then
+# its partition freezes. 48h sits below the seeded 72h max lateness on purpose, so
+# the 48-72h band stays non-empty and late_after_close is demonstrable. DDIA Ch 11.
+HORIZON_HOURS = 48
+
+
+def add_lateness(events: DataFrame) -> DataFrame:
+    # lateness = processing time minus event time: how long after it happened the
+    # event landed. Epoch-second casts keep the subtraction tz-safe. This is the
+    # single axis the horizon cuts on. DDIA Ch 11.
+    return events.withColumn(
+        "_lateness_hours",
+        (F.col("ingestion_timestamp").cast("long") - F.col("event_timestamp").cast("long")) / 3600.0,
+    )
+
+
+def within_horizon(events: DataFrame, horizon_hours: int = HORIZON_HOURS) -> DataFrame:
+    # Eligible for Gold: arrived within the horizon of its event time. On-time and
+    # within-horizon-late collapse here because both belong in the correct
+    # aggregate for their event_date. Helper column dropped so Gold stays clean.
+    return add_lateness(events).where(F.col("_lateness_hours") <= horizon_hours).drop("_lateness_hours")
+
+
+def past_horizon(events: DataFrame, horizon_hours: int = HORIZON_HOURS) -> DataFrame:
+    # Stragglers past the horizon: routed to late_after_close, NEVER into Gold, so a
+    # frozen partition stays frozen. Nothing dropped: within_horizon + past_horizon
+    # = all Silver, the same clean+rejects=total invariant as W4. _lateness_hours is
+    # kept as the evidence of why each row was diverted.
+    return add_lateness(events).where(F.col("_lateness_hours") > horizon_hours)
