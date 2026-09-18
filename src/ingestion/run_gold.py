@@ -148,3 +148,51 @@ truth = (
 )
 print("Silver within-horizon truth for", TARGET_DATE, ":", truth)
 assert after == truth, "Gold after reprocess does not match within-horizon Silver"
+
+# %%
+# Blast radius: prove replaceWhere rewrote ONE partition's files, not all 30. The
+# transaction log is the auditor: DESCRIBE HISTORY exposes operationMetrics per
+# commit, the same append-only log that makes checkpoint recovery and time travel
+# possible. DDIA Ch 3.
+from delta.tables import DeltaTable
+
+hist = DeltaTable.forPath(spark, GOLD_PLAYER_DAILY).history()
+hist.select("version", "operation", "operationParameters", "operationMetrics") \
+    .orderBy(F.col("version").desc()).show(10, truncate=False)
+
+# %%
+# Read metrics off two commits: version 0 is the clean build (touched all 30
+# partitions), the latest is the replaceWhere reprocess (should touch one). The
+# gap between the two file counts IS the blast radius. Metric key names shift by
+# Delta version, so print the whole map and read the numbers directly.
+commits = {r["version"]: r for r in hist.collect()}
+latest_v = max(commits)
+
+print("=== clean build (v0), all 30 partitions ===")
+print(commits[0]["operation"], commits[0]["operationMetrics"])
+
+print("=== latest reprocess (v" + str(latest_v) + "), replaceWhere one partition ===")
+print(commits[latest_v]["operation"], commits[latest_v]["operationParameters"].get("predicate"))
+print(commits[latest_v]["operationMetrics"])
+
+# %%
+# Reprocess idempotency: run the SAME replaceWhere a second time, identical input.
+# The count must not move. Honest nuance for the interview: replaceWhere is
+# deterministic in OUTPUT but re-executes, so it rewrites files again. Idempotency
+# here means identical END STATE, not zero work done. Definition of done item 2.
+before_2 = spark.read.format("delta").load(GOLD_PLAYER_DAILY) \
+    .where(F.col("event_date") == TARGET_DATE) \
+    .agg(F.sum("total_events").alias("e")).first()["e"]
+
+reprocess_partition(build_player_daily(full_target), GOLD_PLAYER_DAILY, TARGET_DATE)
+
+after_2 = spark.read.format("delta").load(GOLD_PLAYER_DAILY) \
+    .where(F.col("event_date") == TARGET_DATE) \
+    .agg(F.sum("total_events").alias("e")).first()["e"]
+
+total_rows = spark.read.format("delta").load(GOLD_PLAYER_DAILY).count()
+print("target events before 2nd reprocess:", before_2)
+print("target events after  2nd reprocess:", after_2)
+print("player_daily total rows:", total_rows)
+assert before_2 == after_2 == truth, "second identical reprocess moved the target count"
+assert total_rows == 570, "second reprocess changed table row count"

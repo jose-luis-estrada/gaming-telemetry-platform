@@ -386,28 +386,28 @@ All met 2026-07-31.
       Gold is small (aggregates, not raw events), so the partition exists for
       incremental late-data rewrite, not for scan pruning of a large table. This is
       a different reason from Bronze/Silver, and the difference is stated. DDIA Ch 6.
-- [ ] Late-arriving data is handled at Gold, not hidden: a late event lands in an
+- [X] Late-arriving data is handled at Gold, not hidden: a late event lands in an
       already-closed event_date (event time, not processing time, DDIA Ch 11) and
       the Gold aggregate for exactly that date is recomputed with replaceWhere on
       the event_date partition, never a full-table recompute. Blast radius is
       measured: N within-horizon late events touch M partitions, and only those M
       partitions are rewritten (tx log numRemovedFiles / numAddedFiles scoped to
       those dates).
-- [ ] The correction is CORRECT, not just bounded: for a partition that received
+- [X] The correction is CORRECT, not just bounded: for a partition that received
       late events within the 48h horizon, the Gold count before reprocessing is
       wrong-low, and after reprocessing it matches Silver restricted to
       within-horizon arrivals for that date. The seeded 48-to-72h stragglers land
       in gold.late_after_close, not in Gold: nothing dropped, Gold frozen once the
       horizon passes. One query shows both populations. Late-arrivals postmortem
       evidence, gathered not asserted.
-- [ ] The 48h horizon is an explicit decision with its cost written down: Gold is
+- [X] The 48h horizon is an explicit decision with its cost written down: Gold is
       correct for a date only for arrivals within 48h of that date, then the
       partition freezes. Past-horizon arrivals are neither dropped nor merged, they
       accumulate in gold.late_after_close. This trades bounded staleness for bounded
       rewrite cost: without a horizon any partition could be rewritten forever. The
       48h cut, below the seeded 72h max, is what keeps late_after_close non-empty
       and the trade-off demonstrable. DDIA Ch 11.
-- [ ] Gold is idempotent: rebuilt from a fixed Silver, two runs give identical Gold
+- [X] Gold is idempotent: rebuilt from a fixed Silver, two runs give identical Gold
       row counts on all three tables. A late-data reprocess followed by a second
       identical reprocess also does not change counts (reprocessing is itself
       idempotent, not only the clean build). Definition of done item 2.
@@ -1072,3 +1072,13 @@ late_after_close = 416,604, non-empty as designed (~1/3 of the ~1M seeded late
 arrivals, the 48-72h band; slightly above 1/3 because lateness starts at 300s not
 0). Gold unchanged at 570/120/20. Horizon = 48h, below the seeded 72h max, is what
 keeps the band demonstrable. DDIA Ch 11.
+
+replaceWhere reprocess verified end to end. Blast radius from tx log: clean build
+v9 numFiles 30 (all partitions); replaceWhere v11 numRemovedFiles 1, numFiles 1,
+numOutputRows 19 (one partition of 30, the 19 players of that date). Correctness:
+before 1,628,058 wrong-low, after 1,652,404 == within-horizon Silver truth, delta
+24,346 == within-horizon late rows. Reprocess idempotent: second identical
+replaceWhere left target at 1,652,404 and table at 570. DDIA Ch 3 (tx log as
+auditor), Ch 11 (event-time horizon). Bonus: v2 in DESCRIBE HISTORY still shows
+numFiles 31 / 589, the phantom-day-31 bug fossilized before the fix. Delta time
+travel audited my own partition bug.
