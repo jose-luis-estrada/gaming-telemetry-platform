@@ -368,13 +368,13 @@ All met 2026-07-31.
 
 ## Week 6 exit criteria
 
-- [ ] A Gold layer exists as the Silver -> Gold boundary: three business tables,
+- [X] A Gold layer exists as the Silver -> Gold boundary: three business tables,
       each built from Silver, each a named consumer of the platform. Gold is where
       the config-driven thesis deliberately STOPS: Bronze and Silver are declared
       in YAML, Gold aggregates are bespoke business logic. The stop is a decision
       with a reason (a generic aggregate DSL was the rejected option: it buys
       nothing for three tables and costs defensibility), not an omission.
-- [ ] The tables are fixed at three, each with a distinct grain and a distinct
+- [X] The tables are fixed at three, each with a distinct grain and a distinct
       reason to exist: player_daily (one row per player per event_date,
       engagement), game_health_daily (one row per game_id per event_date, crash
       rate from the semi/unstructured crash source), and revenue_daily (one row
@@ -382,7 +382,7 @@ All met 2026-07-31.
       W3). purchases has no game_id and no late-arrival defect, so revenue_daily is
       the clean baseline: the late-data horizon machinery lives only in the two
       player_events tables. Three grains, three source shapes, no fourth table.
-- [ ] Gold is partitioned on event_date and the choice is defended in one query:
+- [X] Gold is partitioned on event_date and the choice is defended in one query:
       Gold is small (aggregates, not raw events), so the partition exists for
       incremental late-data rewrite, not for scan pruning of a large table. This is
       a different reason from Bronze/Silver, and the difference is stated. DDIA Ch 6.
@@ -416,7 +416,7 @@ All met 2026-07-31.
       Bronze -> Silver -> Gold dependency graph. This is the cloud-only criterion
       (UC does not exist locally) and it maps directly to the JD cataloging,
       lineage, and metadata requirement. Verified in the lineage view, not asserted.
-- [ ] PROGRESS.md records this section and, as settled decisions: the three-table
+- [X] PROGRESS.md records this section and, as settled decisions: the three-table
       Gold set, replaceWhere as the late-data rewrite mechanism, the 48h horizon
       with gold.late_after_close for past-horizon arrivals, and config-driven
       stops-at-Gold. Each with its rejected alternative.
@@ -1082,3 +1082,10 @@ replaceWhere left target at 1,652,404 and table at 570. DDIA Ch 3 (tx log as
 auditor), Ch 11 (event-time horizon). Bonus: v2 in DESCRIBE HISTORY still shows
 numFiles 31 / 589, the phantom-day-31 bug fossilized before the fix. Delta time
 travel audited my own partition bug.
+
+Closed the three verification criteria. Grain asserted unique for all three tables
+(row count == distinct grain keys: 570/120/20). Partition defense backed by
+numbers: ~19 rows per Gold partition, so event_date is for replaceWhere rewrite
+scoping (v11 numFiles 1 of 30), not scan pruning, a different reason from
+Bronze/Silver. Ch 6. config/ has sources/ only, no gold/: config-driven stops at
+Gold on purpose, generic aggregate DSL rejected as no-reuse-for-three-tables.

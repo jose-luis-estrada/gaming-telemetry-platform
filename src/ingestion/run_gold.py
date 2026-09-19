@@ -196,3 +196,31 @@ print("target events after  2nd reprocess:", after_2)
 print("player_daily total rows:", total_rows)
 assert before_2 == after_2 == truth, "second identical reprocess moved the target count"
 assert total_rows == 570, "second reprocess changed table row count"
+
+# %%
+# W6 verification: grain is EXACTLY what we claim, and Gold's partition is sized
+# for rewrite scoping, not scan pruning. Assertions close the criteria with
+# evidence instead of a claim in prose.
+
+# Grain check: row count must equal distinct grain keys. If they differ, a builder
+# emitted duplicate grain rows and the "one row per X" claim is false.
+grains = {
+    GOLD_PLAYER_DAILY: ["event_date", "player_id"],
+    GOLD_GAME_HEALTH_DAILY: ["event_date", "game_id"],
+    GOLD_REVENUE_DAILY: ["purchase_date", "item_category"],
+}
+for path, keys in grains.items():
+    df = spark.read.format("delta").load(path)
+    total, distinct = df.count(), df.select(*keys).distinct().count()
+    print(path.split("/")[-1], "rows:", total, "distinct grain:", distinct)
+    assert total == distinct, f"{path} grain not unique: duplicate {keys} rows"
+
+# %%
+# Partition-size evidence for the defense: Gold partitions hold ~19 rows each, so
+# partitioning cannot be for scan pruning (nothing meaningful to skip). It exists
+# so replaceWhere scopes a late-data rewrite to one partition, proven by v11's
+# numFiles=1. Different reason from Bronze/Silver, which prune a large scan. Ch 6.
+(
+    spark.read.format("delta").load(GOLD_PLAYER_DAILY)
+    .groupBy("event_date").count().orderBy("event_date").show(5, truncate=False)
+)
