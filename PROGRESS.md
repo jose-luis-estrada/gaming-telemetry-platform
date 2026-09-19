@@ -1,8 +1,8 @@
 # PROGRESS
 
 Ship date: 2026-09-30
-Current week: 6
-Hours logged: 60
+Current week: 7
+Hours logged: 70
 
 ## How to read this file
 
@@ -86,7 +86,7 @@ Items 1 through 3 are scaffolding.
 - [X] W3  Ingestion framework, part 2
 - [X] W4  Data quality framework
 - [X] W5  Skew and joins
-- [ ] W6  Gold, late data, lineage
+- [X] W6  Gold, late data, lineage
 - [ ] W7  CI/CD, runbook
 - [ ] W8  README, diagrams, mock interview
 
@@ -411,7 +411,7 @@ All met 2026-07-31.
       row counts on all three tables. A late-data reprocess followed by a second
       identical reprocess also does not change counts (reprocessing is itself
       idempotent, not only the clean build). Definition of done item 2.
-- [ ] Unity Catalog lineage is visible in the Databricks demo: the three Gold
+- [X] Unity Catalog lineage is visible in the Databricks demo: the three Gold
       tables are registered in workspace.telemetry and the catalog shows the
       Bronze -> Silver -> Gold dependency graph. This is the cloud-only criterion
       (UC does not exist locally) and it maps directly to the JD cataloging,
@@ -1089,3 +1089,14 @@ numbers: ~19 rows per Gold partition, so event_date is for replaceWhere rewrite
 scoping (v11 numFiles 1 of 30), not scan pruning, a different reason from
 Bronze/Silver. Ch 6. config/ has sources/ only, no gold/: config-driven stops at
 Gold on purpose, generic aggregate DSL rejected as no-reuse-for-three-tables.
+
+Closed W6 lineage in cloud, Option A (player_events branch, revenue stays local).
+Three notebooks in notebooks/databricks/: 02_run_silver_uc, 03_run_gold_uc, both
+pushed. Silver materialized in UC (6,666,280 rows, dedup removed 66,529 = ~1%, the
+seeded duplicate defect, verified in cloud). Two Gold tables materialized reading
+Silver by name. UC lineage graph renders end to end: landing Volume -> bronze ->
+silver -> {gold_player_daily, gold_game_health_daily}, four hops, column level.
+Pure builders ran unchanged local and cloud: gold.py did not need one edit, the
+payoff of pure functions. Correction to earlier note: the cloud Volume subset is
+4 days (76 = 19x4, 16 = 4x4), not 3. saveAsTable (not save by path) is what
+registers a table in UC and attaches it to the lineage graph.
