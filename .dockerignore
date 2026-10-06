@@ -1,0 +1,26 @@
+# Data: mounted at runtime, never baked into the image
+data/
+*.parquet
+
+# Secrets
+.env
+.envrc
+
+# Git and local environments
+.git/
+.venv/
+venv/
+env/
+
+# Python and tooling caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+.mypy_cache/
+.ruff_cache/
+
+# OS and run artifacts
+.DS_Store
+*.log
+.repro_*
