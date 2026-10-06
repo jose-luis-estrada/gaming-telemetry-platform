@@ -421,6 +421,42 @@ All met 2026-07-31.
       with gold.late_after_close for past-horizon arrivals, and config-driven
       stops-at-Gold. Each with its rejected alternative.
 
+## Week 7 exit criteria
+
+### Pipeline plumbing (DoD scaffolding, items 1-2)
+- [ ] `make pipeline` exists and runs Bronze -> Silver -> Gold end to end from a
+      fixed landing with zero manual steps. This is the first target that chains
+      the layers; today they are separate (make ingest/silver/gold).
+- [ ] `make pipeline` run twice produces identical Gold row counts (570/120/20).
+      Idempotency demonstrated END TO END, not just per layer as in W5/W6.
+
+### CI/CD (DoD item 3)
+- [ ] pytest suite runs green in GitHub Actions on every push: repro/defect
+      checks (W1), quality + quarantine split (W4), config parsing, and
+      Silver/Gold idempotency, all on a small fixture.
+- [ ] CI runs on a subset fixture, NOT the 50M dataset, and the reason is written
+      down: CI is a correctness gate, scale is a local Spark-UI measurement. A
+      50M run in CI proves nothing and burns the runner.
+
+### Monitoring
+- [ ] Each layer emits structured run metrics to a durable place (rows in/out,
+      rejects count, duration, partitions written), so a failed run is
+      diagnosable AFTER the fact, not only live. Plain logging plus a small
+      metrics table. No external monitoring stack (defensibility rule).
+
+### RUNBOOK (DoD item 5, the deliverable)
+- [ ] RUNBOOK.md exists and answers at least: "Bronze job failed at 3 AM." The
+      ordered checks, and how to re-run without duplicating data (checkpoint +
+      idempotency story). Written from lived failures, not invented.
+
+### Loose ends that gate this week
+- [ ] Volume mirrored to the per-source subtree, OR cloud declared out of
+      `make pipeline` scope with a reason. Right now "do NOT run cloud until this
+      is done" is in your Open loose ends.
+- [ ] config.py empty-string-as-missing bug fixed or re-parked with a reason.
+- [ ] Two-run overwrite/checkpoint stability re-confirmed on the restructured Volume.
+- [ ] PROGRESS.md records the W7 section and the make-pipeline decision in the Log.
+
 ## Postmortems
 
 One page each: what I expected, what broke, how I diagnosed it, what I changed,
