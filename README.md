@@ -1,157 +1,139 @@
 # gaming-telemetry-platform
 
-A config-driven ingestion and data quality framework, built on PySpark, Delta
-Lake and Unity Catalog, and demonstrated on 50 million rows of synthetic gaming
-telemetry.
+A config-driven lakehouse for gaming telemetry: ingestion, data quality, Silver
+deduplication and Gold aggregates on Delta Lake. A new source is onboarded with
+one YAML file and zero new framework code.
 
-The telemetry pipeline is the client of the platform, not the product. A new
-source is onboarded by adding one YAML file, with zero new ingestion code.
+The platform is exercised against a deterministic 50M-event dataset with five
+production failure modes seeded on purpose and recorded as ground truth before
+any data exists. Every number the platform reports is reconciled against that
+ground truth.
 
-## What this project is actually for
+## Guarantees
 
-Most portfolio pipelines run clean on the first try, which means they answer no
-questions. This one ships with five defects seeded on purpose, each one recorded
-as ground truth in a manifest before any data is generated, and each one
-verifiable against that manifest with a single query.
+| Layer | Guarantee |
+|---|---|
+| Landing | Immutable system of record. Every table downstream can be rebuilt from it. |
+| Bronze | As landed, schema-on-read, partitioned by event date. Lineage on every row: `_source_name`, `_source_file`, `_ingested_at`, `_batch_id`. |
+| Quarantine | Rows failing a row-level rule, with the rule, time and run that rejected them. Nothing is dropped silently. |
+| Silver | One row per business key within a bounded dedup window, ordered by producer sequence, never by wall clock. |
+| Gold | Three aggregates with declared grains. Late data within a 48h horizon corrects only the affected partitions; later arrivals are routed to `late_after_close`. |
 
-| Defect | How it is seeded | Why it is here |
+Rerunning any stage for the same input is a no-op on row counts.
+
+## Failure modes the platform must handle
+
+| Defect | Seeded as | Handling |
 |---|---|---|
-| Skew | One `game_id` holds 37% of 50M events | Stragglers and shuffle partition imbalance. Fixed with salting and AQE. DDIA Ch 6. |
-| Late arrivals | 2 to 3% of events arrive up to 72 hours late | Event time versus processing time. A late event lands in an already-closed partition. DDIA Ch 11. |
-| Duplicates | 1% of events repeat, in two flavors | Byte-identical retries and same-key-different-payload corrections. Ordering cannot use a wall clock: three producers means three clocks. DDIA Ch 8. |
-| Schema drift | A key appears inside a JSON blob from day 15 on | Bronze is schema-on-read, so drift lands instead of failing the job. Enforcement belongs downstream. |
-| Small files | Producers flush every 5 minutes, 102,056 files at ~200 KB | The small-files tax, measured on four axes: compute, API calls, latency, disk slack. Collapsed with Delta OPTIMIZE. DDIA Ch 3. |
+| Skew | One `game_id` holds 37% of events | Observed in task metrics, resolved with salting ([ADR-0010](docs/adr/0010-skew-salting.md)) |
+| Late arrivals | 2 to 3% of events arrive up to 72h late | Event-time partitions, 48h horizon, partition-scoped rewrite ([ADR-0008](docs/adr/0008-late-data-horizon.md)) |
+| Duplicates | 1% repeat: byte-identical retries and same-key corrections | Bounded dedup on `(producer_id, source_sequence_number)` ([ADR-0006](docs/adr/0006-bounded-dedup.md)) |
+| Schema drift | A key appears inside the `metadata` JSON from day 15 | Absorbed by schema-on-read Bronze, enforced by a hard quality rule ([ADR-0007](docs/adr/0007-quality-rules-and-quarantine.md)) |
+| Small files | 102,056 files at ~200 KB | Compaction as a platform stage ([ADR-0011](docs/adr/0011-compaction.md)) |
 
-Four of these are silent. Skew announces itself in the Spark UI: slow, but
-correct. Drift, late arrivals and duplicates produce plausible-looking numbers
-with no failure signal at all, which is the harder and more interesting class of
-bug.
-
-Each defect gets a written postmortem: what was expected, what broke, how it was
-diagnosed, what changed, and what would be different at 100x scale.
-
-## The design thesis
-
-A pipeline solves one movement problem. A platform onboards the next source
-without new code.
-
-The source contract lives entirely in `config/sources/*.yaml`. Fields are split
-by when they bite: `format`, `landing_path` and `bronze_table` act at ingestion
-time, while `schema`, `dedup_key` and `quality_rules` are declared up front but
-enforced downstream. `run.py` is a loop over that directory, so source number
-four is a config change rather than a code change.
-
-The config loader fails loud. A missing required field, an unknown format, or a
-typo'd key raises instead of ingesting garbage silently.
+Four of the five are silent: they produce plausible numbers with no failure
+signal. Each is covered by a check that reconciles against
+`config/manifest.json`.
 
 ## Architecture
 
-Landing (parquet) to Bronze (Delta) to Silver to Gold, with the layer boundaries
-defined by guarantees rather than by transformations.
+```
+landing (parquet, per-source subtree, event_date partitions)
+   |  ingest      PySpark, config-driven, lineage stamped
+   v
+bronze (Delta) --quality gate--> quarantine (Delta)
+   |  silver      bounded dedup per source contract
+   v
+silver (Delta)
+   |  gold        pure builders, 48h horizon
+   v
+gold (Delta): player_daily, game_health_daily, revenue_daily, late_after_close
+   |  optimize    Delta compaction, optional Z-ORDER
+```
 
-Bronze is as-landed and append-only. `metadata` stays a raw JSON string, nothing
-is parsed, nothing is deduplicated. Every row carries lineage: `_source_name`,
-`_source_file`, `_ingested_at`, `_batch_id`. That is the first thing on-call
-reads at 3 AM, because it answers which file and which run.
+All deployment differences live behind one `Environment` seam
+([ADR-0002](docs/adr/0002-environment-seam.md)). The current implementation runs
+local PySpark against the filesystem. The target deployment is a self-hosted
+lakehouse on Kubernetes (KIND) with SeaweedFS for S3-compatible storage, Airflow
+for orchestration and dbt for Silver and Gold
+([ADR-0014](docs/adr/0014-self-hosted-lakehouse-on-kind.md)).
 
-The project runs in two environments on purpose, because neither one alone does
-the job:
+## Onboarding a source
 
-| Environment | Purpose | Limitation |
+Add `config/sources/<name>.yaml`:
+
+```yaml
+name: purchases
+format: parquet
+landing_path: purchases
+bronze_table: bronze.purchases
+checkpoint_path: purchases
+schema: [...]
+identity_key: [purchase_id]
+ordering_key: [purchase_timestamp]
+quality_rules:
+  - { name: purchase_id_not_null, type: row, column: purchase_id, check: not_null }
+```
+
+The loader fails at load time on missing fields, unknown keys, unknown formats
+and any quality rule the engine would not execute
+([ADR-0001](docs/adr/0001-config-driven-source-contracts.md)).
+
+## Running locally
+
+Requires Python 3.11 and Java 17.
+
+```bash
+make install        # pip install -e ".[dev]"
+make generate       # build the dataset from config/manifest.json
+make verify-repro   # prove the same seed produces a bit-identical dataset
+make pipeline       # ingest -> quality -> silver -> gold -> optimize
+make verify-late-data
+make test
+make lint
+```
+
+Data lives under `TELEMETRY_DATA_ROOT` (default `data/`, gitignored). The full
+dataset needs about 7.5 GB of peak memory to generate and a 6 GB Spark driver
+heap for Silver in local mode (`SPARK_DRIVER_MEMORY`).
+
+Or in Docker:
+
+```bash
+docker build -t gaming-telemetry-platform .
+docker run --rm -it -p 4040:4040 -v "$PWD/data:/app/data" gaming-telemetry-platform make pipeline
+```
+
+## Reference results (full scale)
+
+| Check | Expected | Observed |
 |---|---|---|
-| Local PySpark in Docker | Spark internals. Readable DAG, stage boundaries, task counts, shuffle behavior, Spark UI at localhost:4040. Every scale measurement here was taken locally. | No Delta on cloud storage, no Unity Catalog, no Autoloader. |
-| Databricks Free Edition | Delta, Unity Catalog, Autoloader, OPTIMIZE. | Serverless only, so there is no Spark UI, only the query profile. |
-
-The landing zone is S3, synced with the AWS CLI under a dedicated IAM user.
-Databricks Free Edition cannot read it: serverless egress to an arbitrary bucket
-requires a network allowlist through an account-level API that Free Edition does
-not expose. So the cloud landing that Databricks reads is a Unity Catalog Volume
-holding a deliberate subset. Both landings are real, and the difference between
-them is stated rather than hidden.
-
-## Status
-
-Built:
-
-- **W1. Synthetic data generator.** 50M events across 30 days, five seeded
-  defects recorded in a manifest, each verifiable with a single query.
-  Bit-identical output for a fixed seed (`make verify-repro`, which generates
-  twice in separate processes and compares a hash of the whole output tree). A
-  two-phase generator holds peak memory near 7.5 GB instead of the ~36 GB a
-  naive single-frame approach needed.
-- **W2. Config-driven ingestion, part 1.** A YAML declares a source; the
-  framework validates it, reads it schema-on-read, stamps lineage, and writes
-  Bronze as a Delta table partitioned by `event_date`. Ingestion is idempotent:
-  two separate runs produce an identical row count of 50,500,000, which includes
-  the seeded duplicates by design.
-- **W3, in progress.** Landing synced to S3 (102,056 objects, verified against
-  the manifest) and a subset mirrored to a Unity Catalog Volume.
-
-Roadmap:
-
-- **W3.** Autoloader for incremental ingest, Delta OPTIMIZE, multi-source.
-- **W4 to W5.** Data quality framework, skew resolution, join strategies.
-- **W6.** Gold layer (three tables), late-arriving data, lineage.
-- **W7.** CI/CD, tests in GitHub Actions, `RUNBOOK.md`.
-- **W8.** Architecture diagrams and documentation polish.
-
-The full dated decision log, exit criteria, and parked decisions live in
-[`PROGRESS.md`](PROGRESS.md).
-
-## Design notes
-
-A few decisions worth calling out. The rest are in `PROGRESS.md`, each with the
-alternative that was rejected and why.
-
-**The load-bearing number is 50M rows, not 2.1 GB on disk.** Columnar
-compression over closed vocabularies shrinks the bytes (DDIA Ch 3), but shuffle
-spill, stragglers, and broadcast-versus-sort-merge join behavior all track row
-distribution, not file size. 50M is the smallest scale where those effects are
-observable.
-
-**Partitioning is on event time, not ingestion time.** `event_timestamp` drives
-the `event_date` partition, so a late-arriving event lands in an already-closed
-partition and the event-time versus processing-time boundary stays verifiable
-with one query (DDIA Ch 11).
-
-**The small-files tax was measured, not assumed.** Ingesting 2.1 GB spawns 3,190
-tasks, because 102,056 files at ~200 KB each hit the 4 MB
-`spark.sql.files.openCostInBytes` floor, so bin-packing lands about 32 files per
-128 MB partition. That number is the baseline OPTIMIZE has to beat.
-
-**Bronze uses `overwrite` for idempotency in the W2 local demo, and that is
-temporary.** Overwrite guarantees idempotency by rewriting everything: O(total)
-per run, and it destroys history. An Autoloader checkpoint guarantees it by
-remembering what was already read: O(new) per run, and Bronze stays append-only.
-The checkpoint is an append-only log, which is the same structure that makes
-Delta time travel possible (DDIA Ch 3).
+| Bronze rows | 50,500,000 (50M + 1% duplicates) | 50,500,000 |
+| Silver rows | 50M distinct + 5 out-of-window duplicates | 50,000,005 |
+| Drift key before drift day | 0 | 0 |
+| Hot game share | 0.37 +/- 0.02 | 0.3700 |
+| Late-arrival rate | 0.025 +/- 0.01 | 0.0250 |
+| Gold within horizon + past horizon | 50,000,005 | 49,583,401 + 416,604 |
+| Gold rows (player / game / revenue) | stable across runs | 570 / 120 / 20 |
 
 ## Repository layout
 
 ```
 config/
-  manifest.json              ground truth for all seeded defects, written before generation
-  sources/player_events.yaml source contract, one file per source
+  manifest.json        ground truth for the seeded defects, written before generation
+  sources/*.yaml       one contract per source
 src/
-  generator/                 synthetic data generation, two-phase and memory-bounded
-  ingestion/                 config loader, Bronze writer, entrypoint
-notebooks/                   scratch inspection, not part of the pipeline
-tests/
-PROGRESS.md                  dated decision log and weekly exit criteria
+  generator/           deterministic, memory-bounded data generation
+  ingestion/           config loader, environment seam, Bronze, quality, Silver, Gold
+scripts/               operational verification scripts
+tests/unit/            unit tests on small in-memory fixtures
+docs/
+  adr/                 architecture decision records
+  incidents/           incident reports for the seeded defects
 ```
 
-## Running it
+## History
 
-Requires Python 3.11 and Java 17 for local PySpark.
-
-```bash
-pip install -r requirements.txt
-
-make generate       # build the synthetic dataset from config/manifest.json
-make verify-repro   # prove the same seed produces a bit-identical dataset
-make ingest         # landing to Bronze Delta, driven by config/sources/*.yaml
-make test
-```
-
-Generated data is gitignored. `manifest.json` is versioned, because the manifest
-is the specification and the dataset is its output.
+The first implementation, on local PySpark plus Databricks Free Edition
+(Autoloader, Unity Catalog), is preserved at tag
+[`v1-databricks`](https://github.com/jose-luis-estrada/gaming-telemetry-platform/tree/v1-databricks). See [CHANGELOG.md](CHANGELOG.md).
