@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gaming-telemetry-platform"
+version = "0.2.0"
+description = "Config-driven lakehouse for gaming telemetry: ingestion, data quality, Silver dedup and Gold aggregates on Delta Lake."
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+# Spark and Delta are pinned together (Delta 3.2.x pairs with Spark 3.5.x).
+# numpy, pandas and pyarrow drive the generator's bit-identical output for a
+# fixed seed: pin them to the exact versions the reference dataset was built with.
+dependencies = [
+    "pyspark==3.5.3",
+    "delta-spark==3.2.1",
+    "pyyaml>=6.0,<7",
+    "numpy>=1.26,<3",
+    "pandas>=2.2,<3",
+    "pyarrow>=15",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+    "pre-commit>=3",
+]
+
+[tool.setuptools.packages.find]
+include = ["src*", "scripts*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]

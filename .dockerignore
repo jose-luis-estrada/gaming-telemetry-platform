@@ -24,3 +24,6 @@ __pycache__/
 .DS_Store
 *.log
 .repro_*
+# CI and editor config
+.github/
+.vscode/
