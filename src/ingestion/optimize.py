@@ -1,23 +1,30 @@
-def optimize_source(cfg, env, spark):
-    """Compact a source's Bronze table. Config-driven, zero source-specific
-    code: every source gets compaction for free (platform thesis)."""
-    table = env.delta_table(cfg, spark)  # path local / UC name cloud; el seam lo absorbe
+"""Delta compaction as a platform capability.
 
-    # DESCRIBE DETAIL lee el tx log, no los datos: barato y exacto.
-    # numFiles ES el numero del small-files tax.
+Every source gets compaction from its config alone: no source-specific code.
+"""
+
+from src.ingestion.config import SourceConfig
+from src.ingestion.environment import Environment
+
+
+def optimize_source(env: Environment, cfg: SourceConfig, layer: str = "bronze"):
+    """Compact one source's table and return (before, after, metrics).
+
+    ``before`` and ``after`` are rows of DESCRIBE DETAIL (numFiles, sizeInBytes),
+    read from the transaction log rather than the data, so they are cheap and
+    exact. numFiles is the small-files cost being reduced.
+    """
+    table = env.delta_table(cfg, env.spark(), layer)
     before = table.detail().select("numFiles", "sizeInBytes").first()
 
     builder = table.optimize()
-    zorder = getattr(cfg, "zorder_by", None)  # ajusta al accessor real de tu SourceConfig
-    if zorder:
-        # Z-order co-localiza filas con el mismo valor de columna en los mismos
-        # archivos, para que un read filtrado brinque archivos enteros. Off por
-        # default: es una decision de read-shape del source, no un default de compaction.
-        result = builder.executeZOrderBy(*zorder)
+    if cfg.zorder_by:
+        # Z-ORDER co-locates rows with similar values of the given columns so a
+        # filtered read can skip whole files. Opt-in per source: it is a decision
+        # about that source's read pattern, not a compaction default.
+        result = builder.executeZOrderBy(*cfg.zorder_by)
     else:
-        # Bin-packing: fusiona archivos pequenos en archivos de ~1 GB. Es el paso
-        # de compaction LSM (DDIA Ch 3): appendeas segments chicos baratos en el
-        # write, los consolidas despues para bajar read amplification.
+        # Bin-packing: merge small files into larger ones.
         result = builder.executeCompaction()
 
     after = table.detail().select("numFiles", "sizeInBytes").first()
