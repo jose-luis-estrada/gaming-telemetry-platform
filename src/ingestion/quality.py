@@ -98,8 +98,7 @@ def split_quarantine(df, rules, run_id):
     # the FIRST violated rule so a row rejected by two rules reports one reason,
     # not a row duplicated across reasons. coalesce picks the first non-null.
     violation_tags = [
-        F.when(~_ROW_CHECKS[r["check"]](r["column"]), F.lit(r["name"]))
-        for r in row_rules
+        F.when(~_ROW_CHECKS[r["check"]](r["column"]), F.lit(r["name"])) for r in row_rules
     ]
     # _reject_rule is null for a clean row (no rule violated), else the first hit.
     tagged = df.withColumn("_reject_rule", F.coalesce(*violation_tags))

@@ -38,7 +38,7 @@ def within_dedup_window(df: DataFrame, cfg: SourceConfig):
     SAME identity landed. Two rows of one event_id are reconcilable only if their
     ingestion_timestamps are within dedup_window_hours of EACH OTHER. A copy that
     landed far later than its original escapes and survives dedup, which is what
-    makes the bounded guarantee visible. DDIA Ch 3: bounded, not global.
+    makes the bounded guarantee visible. Bounded, not global.
 
     WHY the earlier max-of-batch anchor was wrong: events span 30 days, so the
     batch max ingestion is day 30 and a 72h window covered only the last 3 days.
@@ -53,9 +53,7 @@ def within_dedup_window(df: DataFrame, cfg: SourceConfig):
     # earliest one is reconcilable; a copy beyond it escapes. Using the earliest
     # (not the latest) makes the anchor stable regardless of how many copies exist.
     anchor = Window.partitionBy(*cfg.identity_key)
-    tagged = df.withColumn(
-        "_anchor_ingest", F.min("ingestion_timestamp").over(anchor)
-    )
+    tagged = df.withColumn("_anchor_ingest", F.min("ingestion_timestamp").over(anchor))
 
     # Distance in seconds between this row and its identity's earliest copy.
     # <= window: reconcilable (goes through dedup). > window: escapee (untouched).
@@ -80,7 +78,7 @@ def build_silver(bronze_df: DataFrame, cfg: SourceConfig) -> DataFrame:
     reconcilable, escapees = within_dedup_window(bronze_df, cfg)
     deduped = deduplicate(reconcilable, cfg)
     # unionByName, not union: match on column name, not position, so a schema
-    # change upstream cannot silently misalign the two frames. W4 used the same.
+    # change upstream cannot silently misalign the two frames.
     return deduped.unionByName(escapees)
 
 

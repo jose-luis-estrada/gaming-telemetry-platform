@@ -5,8 +5,8 @@ aggregate is bespoke business logic, so a generic aggregate DSL would buy nothin
 for three tables and cost the ability to defend each metric. Each builder is a
 pure function of a DataFrame so it unit-tests on small hand-built frames."""
 
-from pyspark.sql import DataFrame, functions as F
-
+from pyspark.sql import DataFrame
+from pyspark.sql import functions as F
 
 # ----------------------------
 # player_events -> daily tables
@@ -15,6 +15,7 @@ from pyspark.sql import DataFrame, functions as F
 # belongs to the day it HAPPENED, so a late event lands in an already-closed
 # partition. That is what makes late data a Gold problem and not a no-op. Ch 11.
 
+
 def build_player_daily(events: DataFrame) -> DataFrame:
     # Grain: one row per player per event day. Use Silver's canonical event_date
     # column, set once in the generator from event time and carried through every
@@ -22,24 +23,19 @@ def build_player_daily(events: DataFrame) -> DataFrame:
     # and produced a phantom 31st date, because the generator's day bucket is
     # offset from midnight so a bucket crosses a calendar boundary. One boundary,
     # one definition, or replaceWhere on event_date selects different rows per
-    # layer. DDIA Ch 11 semantics hold: Silver's event_date is event-time-derived.
-    return (
-        events
-        .groupBy("event_date", "player_id")
-        .agg(
-            F.count("*").alias("total_events"),
-            F.countDistinct("game_id").alias("games_played"),
-            F.sum((F.col("event_type") == "login").cast("int")).alias("login_count"),
-            F.sum((F.col("event_type") == "crash").cast("int")).alias("crash_count"),
-        )
+    # layer. Silver's event_date is derived from event time.
+    return events.groupBy("event_date", "player_id").agg(
+        F.count("*").alias("total_events"),
+        F.countDistinct("game_id").alias("games_played"),
+        F.sum((F.col("event_type") == "login").cast("int")).alias("login_count"),
+        F.sum((F.col("event_type") == "crash").cast("int")).alias("crash_count"),
     )
 
 
 def build_game_health_daily(events: DataFrame) -> DataFrame:
     # Same fix: group on Silver's event_date, never re-derive it.
     return (
-        events
-        .groupBy("event_date", "game_id")
+        events.groupBy("event_date", "game_id")
         .agg(
             F.count("*").alias("total_events"),
             F.sum((F.col("event_type") == "crash").cast("int")).alias("crash_count"),
@@ -55,11 +51,11 @@ def build_game_health_daily(events: DataFrame) -> DataFrame:
 # clock). So revenue is grained on what the source actually carries, and this
 # table is the clean baseline: no horizon, no reprocessing.
 
+
 def build_revenue_daily(purchases: DataFrame) -> DataFrame:
     # Grain: one row per item_category per purchase day.
     return (
-        purchases
-        .withColumn("purchase_date", F.to_date("purchase_timestamp"))
+        purchases.withColumn("purchase_date", F.to_date("purchase_timestamp"))
         .groupBy("purchase_date", "item_category")
         .agg(
             F.sum("price_usd").alias("revenue_usd"),
@@ -73,36 +69,32 @@ def build_revenue_daily(purchases: DataFrame) -> DataFrame:
 # writer
 # ----------------------------
 
+
 def write_gold(df: DataFrame, path: str, partition_col: str) -> None:
-    # Clean build uses overwrite: each Gold table is a pure function of Silver, so
-    # a wholesale rebuild is the same idempotency mechanism as W2 Bronze (two
-    # runs, identical counts). W6 late data replaces this on the player_events
-    # tables with a partition-scoped replaceWhere so a late event rewrites one
-    # date, not the whole table.
-    (
-        df.write
-        .format("delta")
-        .mode("overwrite")
-        .partitionBy(partition_col)
-        .save(path)
-    )
+    # Clean build uses overwrite: each Gold table is a pure function of Silver,
+    # so a wholesale rebuild is idempotent (two runs, identical counts). Late
+    # data uses reprocess_partition instead, so a late event rewrites one date,
+    # not the whole table.
+    (df.write.format("delta").mode("overwrite").partitionBy(partition_col).save(path))
+
 
 # ----------------------------
-# late-data horizon (W6)
+# late-data horizon
 # ----------------------------
-# Settled: corrections are accepted within 48h of an event's own event time, then
+# Corrections are accepted within 48h of an event's own event time, then
 # its partition freezes. 48h sits below the seeded 72h max lateness on purpose, so
-# the 48-72h band stays non-empty and late_after_close is demonstrable. DDIA Ch 11.
+# the 48-72h band stays non-empty and late_after_close is demonstrable.
 HORIZON_HOURS = 48
 
 
 def add_lateness(events: DataFrame) -> DataFrame:
     # lateness = processing time minus event time: how long after it happened the
     # event landed. Epoch-second casts keep the subtraction tz-safe. This is the
-    # single axis the horizon cuts on. DDIA Ch 11.
+    # single axis the horizon cuts on.
     return events.withColumn(
         "_lateness_hours",
-        (F.col("ingestion_timestamp").cast("long") - F.col("event_timestamp").cast("long")) / 3600.0,
+        (F.col("ingestion_timestamp").cast("long") - F.col("event_timestamp").cast("long"))
+        / 3600.0,
     )
 
 
@@ -110,24 +102,30 @@ def within_horizon(events: DataFrame, horizon_hours: int = HORIZON_HOURS) -> Dat
     # Eligible for Gold: arrived within the horizon of its event time. On-time and
     # within-horizon-late collapse here because both belong in the correct
     # aggregate for their event_date. Helper column dropped so Gold stays clean.
-    return add_lateness(events).where(F.col("_lateness_hours") <= horizon_hours).drop("_lateness_hours")
+    return (
+        add_lateness(events)
+        .where(F.col("_lateness_hours") <= horizon_hours)
+        .drop("_lateness_hours")
+    )
 
 
 def past_horizon(events: DataFrame, horizon_hours: int = HORIZON_HOURS) -> DataFrame:
     # Stragglers past the horizon: routed to late_after_close, NEVER into Gold, so a
     # frozen partition stays frozen. Nothing dropped: within_horizon + past_horizon
-    # = all Silver, the same clean+rejects=total invariant as W4. _lateness_hours is
+    # = all Silver, the same clean + rejects = total invariant as quarantine. _lateness_hours is
     # kept as the evidence of why each row was diverted.
     return add_lateness(events).where(F.col("_lateness_hours") > horizon_hours)
 
+
 # ----------------------------
-# late-data reprocessing (W6)
+# late-data reprocessing
 # ----------------------------
 # replaceWhere: an atomic overwrite scoped to a partition predicate. It rewrites
 # only rows matching the predicate and leaves every other partition's files
 # untouched, so a late batch reprocesses one event_date at O(partition), not the
 # whole table at O(table). This is the update path; the clean build is the insert
-# path. DDIA Ch 3 (the tx log makes the swap atomic and auditable).
+# path.
+
 
 def reprocess_partition(gold_df: DataFrame, path: str, event_date: str) -> None:
     # gold_df is the RECOMPUTED aggregate for one date, already filtered to that
@@ -135,8 +133,7 @@ def reprocess_partition(gold_df: DataFrame, path: str, event_date: str) -> None:
     # wider predicate rewrites more than intended, a narrower one appends a
     # duplicate. event_date is a DATE column, so the literal is quoted date text.
     (
-        gold_df.write
-        .format("delta")
+        gold_df.write.format("delta")
         .mode("overwrite")
         .option("replaceWhere", f"event_date = '{event_date}'")
         .save(path)

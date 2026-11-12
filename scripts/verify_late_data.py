@@ -30,7 +30,8 @@ ON_TIME_MAX_HOURS = 6
 
 def total_events(spark, path: str, event_date: str) -> int:
     return (
-        spark.read.format("delta").load(path)
+        spark.read.format("delta")
+        .load(path)
         .where(F.col("event_date") == event_date)
         .agg(F.sum("total_events").alias("n"))
         .first()["n"]

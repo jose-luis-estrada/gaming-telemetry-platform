@@ -117,7 +117,9 @@ def _validate_quality_rules(path, rules: list) -> None:
                 if assertion["op"] not in ASSERT_OPS:
                     raise ValueError(f"{where}: op {assertion['op']!r} not in {sorted(ASSERT_OPS)}")
             else:
-                _require(where, rule, {"name", "type", "severity", "query", "expected", "tolerance"})
+                _require(
+                    where, rule, {"name", "type", "severity", "query", "expected", "tolerance"}
+                )
         else:
             raise ValueError(f"{where}: type {kind!r} must be 'row' or 'aggregate'")
 
