@@ -247,7 +247,10 @@ flush = f"{small['flush_minutes']}min"
 events["event_day"] = events["event_timestamp"].dt.floor("D")
 events["flush_window"] = events["ingestion_timestamp"].dt.floor(flush)
 
-out = REPO_ROOT / "data" / "landing"
+# Each source owns its landing subtree (config/sources/player_events.yaml
+# declares landing_path: player_events). Clean only this source's subtree so a
+# rerun never deletes another source's landing data.
+out = REPO_ROOT / "data" / "landing" / "player_events"
 if out.exists():
     shutil.rmtree(out)  # clean stale runs so file counts stay verifiable
 
@@ -338,7 +341,16 @@ for (event_day, producer, flush_window), group in events.groupby(
     part_dir.mkdir(parents=True, exist_ok=True)
     stamp = pd.Timestamp(flush_window).strftime("%Y%m%dT%H%M")
     fname = f"part-p{producer}-{stamp}.parquet"
-    expand(group).to_parquet(part_dir / fname, index=False)
+    # Spark 3.5 cannot read parquet TIMESTAMP(NANOS), which recent pyarrow writes
+    # by default for pandas datetime64[ns]. Every timestamp here has whole-second
+    # precision, so microseconds lose nothing; allow_truncated_timestamps=False
+    # makes the write fail instead of silently truncating if that ever changes.
+    expand(group).to_parquet(
+        part_dir / fname,
+        index=False,
+        coerce_timestamps="us",
+        allow_truncated_timestamps=False,
+    )
     n_files += 1
 
 print("files written:", n_files)

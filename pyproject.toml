@@ -10,14 +10,15 @@ readme = "README.md"
 requires-python = ">=3.11,<3.12"
 # Spark and Delta are pinned together (Delta 3.2.x pairs with Spark 3.5.x).
 # numpy, pandas and pyarrow drive the generator's bit-identical output for a
-# fixed seed: pin them to the exact versions the reference dataset was built with.
+# fixed seed, so they are pinned exactly. Upgrading any of them requires
+# re-running `make verify-repro` and refreshing the reference results.
 dependencies = [
     "pyspark==3.5.3",
     "delta-spark==3.2.1",
     "pyyaml>=6.0,<7",
-    "numpy>=1.26,<3",
-    "pandas>=2.2,<3",
-    "pyarrow>=15",
+    "numpy==2.4.6",
+    "pandas==2.3.3",
+    "pyarrow==24.0.0",
 ]
 
 [project.optional-dependencies]

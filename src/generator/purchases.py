@@ -76,7 +76,14 @@ for date in DATES:
     # discovery on read, the same contract player_events lands under.
     part_dir = OUT / f"event_date={date}"
     part_dir.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(part_dir / "part-0.parquet", index=False)
+    # Microsecond timestamps: Spark 3.5 cannot read parquet TIMESTAMP(NANOS).
+    # Timestamps have whole-second precision, so nothing is truncated.
+    df.to_parquet(
+        part_dir / "part-0.parquet",
+        index=False,
+        coerce_timestamps="us",
+        allow_truncated_timestamps=False,
+    )
     print(f"purchases {date}: {n} rows -> {part_dir}/part-0.parquet")
 
 print(f"done: {purchase_id} purchase rows across {len(DATES)} dates in {OUT}")
