@@ -1,6 +1,7 @@
 # %%
 import hashlib
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -29,7 +30,10 @@ REPO_ROOT = find_repo_root()
 # ----------------------------
 # The manifest is the spec: written before generation, single source of truth.
 # The generator reads from it and holds no distribution numbers of its own.
-MANIFEST_PATH = REPO_ROOT / "config" / "manifest.json"  # absolute, CWD-independent
+
+# TELEMETRY_MANIFEST selects the manifest, relative to the repo root.
+# Defaults to the full-scale reference profile.
+MANIFEST_PATH = REPO_ROOT / os.environ.get("TELEMETRY_MANIFEST", "config/manifest.json")
 manifest = json.loads(MANIFEST_PATH.read_text())
 
 seed = manifest["seed"]

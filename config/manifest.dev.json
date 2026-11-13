@@ -1,0 +1,46 @@
+{
+  "seed": 42,
+  "rows": 5000000,
+  "event_window": {
+    "start_utc": "2026-01-01T00:00:00Z",
+    "days": 7,
+    "offset_unit": "seconds"
+  },
+  "defects": {
+    "skew": {
+      "game_ids": [1, 2, 3, 4],
+      "hot_game_id": 1,
+      "hot_game_probability": 0.37,
+      "tolerance": 0.02
+    },
+    "late_arrivals": {
+      "late_fraction": 0.025,
+      "max_lateness_hours": 72,
+      "normal_max_delay_seconds": 300,
+      "tolerance": 0.005
+    },
+    "duplicates": {
+      "duplicate_fraction": 0.01,
+      "byte_identical_ratio": 0.7,
+      "out_of_window_count": 5,
+      "dedup_window_hours": 72
+    },
+    "schema_drift": {
+      "drift_day": 3,
+      "new_key": "network_type",
+      "new_key_values": ["wifi", "ethernet", "cellular"],
+      "devices": ["PS5", "PS4"],
+      "version_before": "1.2.0",
+      "version_after": "1.3.0"
+    },
+    "small_files": {
+      "flush_minutes": 5
+    },
+    "crashes": {
+      "crash_fraction": 0.005,
+      "screenshot_fraction": 0.2,
+      "screenshot_min_bytes": 2048,
+      "screenshot_max_bytes": 8192
+    }
+  }
+}
