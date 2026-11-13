@@ -3,13 +3,16 @@
 A rule is declared in the source YAML, not in code: the framework runs the
 rule's query against Bronze and evaluates the scalar result. Adding a rule is
 config, zero new Python. This is the Bronze -> Silver validation gate; Bronze is
-schema-on-read (DDIA Ch 4), so contract enforcement lives here on the read side.
+schema-on-read, so contract enforcement lives here on the read side.
 """
+
 from dataclasses import dataclass
+
 from pyspark.sql import functions as F
 
 # Closed set of operators for hard assertions. Not eval(): a typo in the YAML
-# fails loud instead of executing arbitrary Python.
+# fails loud instead of executing arbitrary Python. Keys must match
+# config.ASSERT_OPS, which the loader validates rules against.
 _OPS = {
     "eq": lambda a, b: a == b,
     "le": lambda a, b: a <= b,
@@ -18,10 +21,12 @@ _OPS = {
 
 # Closed set of row-level predicates. A check maps a column to a boolean column
 # expression that is TRUE when the row is GOOD. not_null: the column is present.
-# Adding a check type is one entry here; adding a RULE is still just YAML.
+# Adding a check type is one entry here plus config.ROW_CHECKS; adding a rule
+# is still just YAML.
 _ROW_CHECKS = {
     "not_null": lambda col: F.col(col).isNotNull(),
 }
+
 
 class QualityError(Exception):
     """Raised when a hard rule fails. Fails the run loud, by design."""
@@ -73,22 +78,27 @@ def split_quarantine(df, rules, run_id):
     """Partition df into (clean, rejects) using the row-level rules.
 
     A row is rejected if it fails ANY row rule. Rejects carry the full original
-    row plus three context columns, so the table stays inspectable: which rule,
-    when, and (via the W2 lineage columns already on the row) which source file.
+    row plus _reject_rule, _rejected_at and _run_id, so the table stays
+    inspectable: which rule, when, which run, and (via the lineage columns
+    already on the row) which source file.
     Nothing is dropped and nothing crashes the run. Silent drop is the anti-goal.
     """
     row_rules = [r for r in rules if r.get("type") == "row"]
     if not row_rules:
         # No row rules: everything is clean, empty rejects. Keeps callers uniform.
-        return df, df.limit(0).withColumn("_reject_rule", F.lit(None).cast("string")) \
-                              .withColumn("_rejected_at", F.lit(None).cast("timestamp"))
+        empty = (
+            df.limit(0)
+            .withColumn("_reject_rule", F.lit(None).cast("string"))
+            .withColumn("_rejected_at", F.lit(None).cast("timestamp"))
+            .withColumn("_run_id", F.lit(None).cast("string"))
+        )
+        return df, empty
 
     # Build one boolean column per rule: TRUE where that rule is VIOLATED. We tag
     # the FIRST violated rule so a row rejected by two rules reports one reason,
     # not a row duplicated across reasons. coalesce picks the first non-null.
     violation_tags = [
-        F.when(~_ROW_CHECKS[r["check"]](r["column"]), F.lit(r["name"]))
-        for r in row_rules
+        F.when(~_ROW_CHECKS[r["check"]](r["column"]), F.lit(r["name"])) for r in row_rules
     ]
     # _reject_rule is null for a clean row (no rule violated), else the first hit.
     tagged = df.withColumn("_reject_rule", F.coalesce(*violation_tags))
@@ -98,8 +108,9 @@ def split_quarantine(df, rules, run_id):
     rejects = (
         tagged.filter(F.col("_reject_rule").isNotNull())
         # _rejected_at stamps THIS run, so you can tell "broken for weeks" from
-        # "started today". _source_file / _source_name already ride the row from W2.
+        # "started today". _source_file / _source_name already ride the row from Bronze.
         .withColumn("_rejected_at", F.current_timestamp())
+        .withColumn("_run_id", F.lit(run_id))
     )
     return clean, rejects
 

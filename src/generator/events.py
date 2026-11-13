@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+
 # ----------------------------
 # Repo root
 # ----------------------------
@@ -19,6 +20,7 @@ def find_repo_root(marker="config"):
             return candidate
     # Fail loud: a missing root is a broken checkout, not something to guess at.
     raise FileNotFoundError(f"repo root not found: no '{marker}' dir above {Path.cwd()}")
+
 
 REPO_ROOT = find_repo_root()
 
@@ -47,6 +49,7 @@ small = manifest["defects"]["small_files"]
 # in a fixed order, so the whole run is reproducible from the seed alone.
 rng = np.random.default_rng(seed)
 
+
 # ----------------------------
 # Helpers
 # ----------------------------
@@ -65,6 +68,7 @@ def build_weights(game_ids, hot_game_id, hot_prob, tolerance):
     assert abs(sum(weights) - 1.0) < tolerance, f"weights sum to {sum(weights)}"
     return weights
 
+
 # Vocabularies live as arrays and are referenced BY CODE in the compact frame.
 # The wide string columns get expanded from these codes at write time, one file
 # at a time, so 50M copies of each string never exist at once.
@@ -72,6 +76,7 @@ EVENT_TYPES = np.array(["login", "logout", "purchase", "match_start", "match_end
 EXCEPTIONS = np.array(["NullPointerException", "TimeoutException", "OutOfMemoryError"])
 DEVICES = np.array(drift["devices"])
 NETWORKS = np.array(drift["new_key_values"])
+
 
 def make_trace(exc_name):
     # Synthetic multi-line trace: enough shape to be semi-structured, not real.
@@ -82,6 +87,7 @@ def make_trace(exc_name):
         f"  at engine.core.Loop.tick(Loop.java:144)\n"
         f"  at engine.core.Main.run(Main.java:57)"
     )
+
 
 # One trace string per exception, expanded by index in the loop. No per-row
 # f-string over 50M rows.
@@ -101,7 +107,7 @@ weights = build_weights(
 )
 
 # start_utc carries the Z, so this Timestamp is tz-aware UTC and every timestamp
-# inherits it. One clock, declared, not implicit. DDIA Ch 8.
+# inherits it. One clock, declared, not implicit.
 start = pd.Timestamp(window["start_utc"])
 window_seconds = window["days"] * 86_400
 
@@ -114,12 +120,14 @@ event_type_code = rng.integers(0, len(EVENT_TYPES), size=n_rows, dtype=np.int8)
 event_timestamp = start + pd.to_timedelta(rng.integers(0, window_seconds, size=n_rows), unit="s")
 
 # ingestion_timestamp is when the event landed, separate from when it happened.
-# Event time vs processing time, DDIA Ch 11. Late delays start where normal ends
+# Event time vs processing time. Late delays start where normal ends
 # so a single threshold separates the two populations and the late fraction is
 # verifiable, not approximate.
 is_late = rng.random(n_rows) < late["late_fraction"]
 normal_delay = rng.integers(0, late["normal_max_delay_seconds"], size=n_rows)
-late_delay = rng.integers(late["normal_max_delay_seconds"], late["max_lateness_hours"] * 3600, size=n_rows)
+late_delay = rng.integers(
+    late["normal_max_delay_seconds"], late["max_lateness_hours"] * 3600, size=n_rows
+)
 delay_seconds = np.where(is_late, late_delay, normal_delay)
 ingestion_timestamp = event_timestamp + pd.to_timedelta(delay_seconds, unit="s")
 
@@ -129,7 +137,7 @@ network_code = rng.integers(0, len(NETWORKS), size=n_rows, dtype=np.int8)
 
 # Schema drift: a metadata KEY appearing from drift_day on. Gated on
 # event_timestamp, not ingestion, so the boundary is clean in partition space
-# and one query verifies it. DDIA Ch 11. Stored as a bool, expanded to JSON later.
+# and one query verifies it. Stored as a bool, expanded to JSON later.
 drift_start = start + pd.Timedelta(days=drift["drift_day"])
 is_new_schema = np.asarray(event_timestamp >= drift_start)
 
@@ -195,7 +203,7 @@ events = pd.DataFrame(
 
 # per-producer monotonic counter in emission order. GLOBAL (needs the full
 # producer column) but only over an int8 array. Paired with producer_id, this is
-# the dedup ordering key: 3 producers, 3 clocks. DDIA Ch 8.
+# the dedup ordering key: 3 producers, 3 clocks.
 events["source_sequence_number"] = events.groupby("producer_id").cumcount().astype(np.int64)
 
 # ----------------------------
@@ -223,9 +231,7 @@ if is_correction.sum() > 0:
 escape = np.arange(n_dup)[: dup["out_of_window_count"]]
 col = dups.columns.get_loc("ingestion_timestamp")
 dups.iloc[escape, col] = (
-    dups.iloc[escape, col]
-    + pd.Timedelta(hours=dup["dedup_window_hours"])
-    + pd.Timedelta(hours=1)
+    dups.iloc[escape, col] + pd.Timedelta(hours=dup["dedup_window_hours"]) + pd.Timedelta(hours=1)
 )
 
 events = pd.concat([events, dups], ignore_index=True)
@@ -236,7 +242,7 @@ events = pd.concat([events, dups], ignore_index=True)
 # Partition = event time, file = processing time. event_date directory from
 # event_timestamp; within it one file per (producer, 5-min flush window) keyed on
 # ingestion_timestamp. A late event lands in an old event_date via a new flush.
-# DDIA Ch 11. Both grouping keys stay as cheap datetime64, never object strings.
+# Both grouping keys stay as cheap datetime64, never object strings.
 flush = f"{small['flush_minutes']}min"
 events["event_day"] = events["event_timestamp"].dt.floor("D")
 events["flush_window"] = events["ingestion_timestamp"].dt.floor(flush)
@@ -244,6 +250,7 @@ events["flush_window"] = events["ingestion_timestamp"].dt.floor(flush)
 out = REPO_ROOT / "data" / "landing"
 if out.exists():
     shutil.rmtree(out)  # clean stale runs so file counts stay verifiable
+
 
 def expand(group):
     # Build the wide string columns for THIS file's rows only. event_type,
@@ -262,8 +269,15 @@ def expand(group):
     net = pd.Series(NETWORKS[g["network_code"].to_numpy()])
     before = '{"device": "' + dev + '", "app_version": "' + drift["version_before"] + '"}'
     after = (
-        '{"device": "' + dev + '", "app_version": "' + drift["version_after"]
-        + '", "' + drift["new_key"] + '": "' + net + '"}'
+        '{"device": "'
+        + dev
+        + '", "app_version": "'
+        + drift["version_after"]
+        + '", "'
+        + drift["new_key"]
+        + '": "'
+        + net
+        + '"}'
     )
     metadata = np.where(g["is_new_schema"].to_numpy(), after, before)
 
@@ -305,15 +319,16 @@ def expand(group):
     )
     # Producer owns schema stability: force a string dtype on the nullable
     # text columns so a batch with no crashes/screenshots writes them as
-    # parquet STRING, not a null/int type. DDIA Ch 4.
+    # parquet STRING, not a null/int type.
     for col in ("stack_trace", "screenshot_path", "screenshot_content_type", "screenshot_sha256"):
         out[col] = out[col].astype("string")
     return out
 
+
 n_files = 0
 # One file per (event_date, producer, flush window). At 50M nearly every cell
 # fills, plus late arrivals open extra cells in already-passed partitions.
-# Deliberately many tiny files: compaction is a W3 platform capability, not the
+# Deliberately many tiny files: compaction is a platform capability, not the
 # producer's job.
 for (event_day, producer, flush_window), group in events.groupby(
     ["event_day", "producer_id", "flush_window"], sort=False

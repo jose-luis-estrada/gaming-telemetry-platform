@@ -1,15 +1,15 @@
 # %%
 from pathlib import Path
 
-from src.ingestion.config import load_source_config
 from src.ingestion.bronze import ingest_source
+from src.ingestion.config import load_source_config
 from src.ingestion.environment import Environment, get_environment
 
 SOURCES_DIR = Path("config/sources")
 
+
 def main(env: Environment | None = None) -> None:
-    # env defaults to TELEMETRY_ENV (local unless set). On Databricks you pass
-    # DatabricksEnvironment() explicitly from a notebook cell.
+    # Resolved from TELEMETRY_ENV unless injected (tests inject one directly).
     env = env or get_environment()
 
     configs = sorted(SOURCES_DIR.glob("*.yaml"))
@@ -22,6 +22,7 @@ def main(env: Environment | None = None) -> None:
         print(f"{cfg.name}: ingested {n} rows")
 
     env.stop()
+
 
 if __name__ == "__main__":
     main()

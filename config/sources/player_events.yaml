@@ -4,7 +4,7 @@ landing_path: player_events
 bronze_table: bronze.player_events
 checkpoint_path: player_events
 
-# Declared contract. Bronze does NOT enforce this; Silver will.
+# Declared contract. Bronze does not enforce it; Silver does.
 schema:
   - { name: event_id, type: long }
   - { name: player_id, type: long }
@@ -17,30 +17,27 @@ schema:
   - { name: metadata, type: string }
   - { name: stack_trace, type: string }
 
-# Used in W5. Dedup is TWO questions, kept as two fields on purpose:
-#   identity_key: which rows are the SAME event (collapse these to one)
-#   ordering_key: which duplicate WINS (keep the max on this key)
-# Conflating them into one dedup_key hid that they mean different things per
-# source. Here the winner is the producer's own counter, NEVER a wall clock:
-# 3 producers = 3 clocks, so a MAX(timestamp) picks a random clock's noise.
-# DDIA Ch 8.
+# Dedup is two questions, kept as two fields:
+#   identity_key: which rows are the same event (collapse these to one)
+#   ordering_key: which duplicate wins (keep the max on this key)
+# The winner is decided by the producer's own counter, never a wall clock:
+# with 3 producers there are 3 clocks, and MAX(timestamp) would pick clock skew.
 identity_key: [event_id]
 ordering_key: [producer_id, source_sequence_number]
 
-# Bounded dedup window. Only reconcile duplicates within this many hours of each
-# other, derived from the 72h max lateness. Global dedup would reshuffle all
-# history every run (DDIA Ch 3). MUST equal manifest duplicates.dedup_window_hours
-# or the 5 seeded out-of-window dups stop being out-of-window and the W5
-# survival test breaks. That coupling is the point, not an accident.
+# Bounded dedup window: duplicates are reconciled only when copies land within
+# this many hours of each other. Derived from the 72h maximum lateness; global
+# dedup would reshuffle all history on every run. Must equal
+# duplicates.dedup_window_hours in config/manifest.json, or the seeded
+# out-of-window duplicates stop being out of window.
 dedup_window_hours: 72
 
-# Used in W4.
 quality_rules:
   # --- row-level rules: evaluated per row, failures go to the rejects table ---
   - { name: event_id_not_null,        type: row, column: event_id,        check: not_null }
   - { name: event_timestamp_not_null, type: row, column: event_timestamp, check: not_null }
 
-  # --- aggregate rules: this session (assert loud / report and pass) ---
+  # --- aggregate rules: hard rules fail the run, soft rules report and pass ---
   # hard: exact invariant. The drift key must not exist before drift_day.
   # observed must be 0, not "close to 0", so this asserts and fails the run.
   - name: schema_drift_before_boundary
@@ -67,7 +64,6 @@ quality_rules:
     tolerance: 0.02
 
   # soft: 2-3% of events arrive later than the 300s normal-delay ceiling.
-  # event time vs processing time, DDIA Ch 11.
   - name: late_arrival_rate
     type: aggregate
     severity: soft

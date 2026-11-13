@@ -3,11 +3,10 @@ format: parquet
 landing_path: purchases
 bronze_table: bronze.purchases
 checkpoint_path: purchases
- 
-# Declared contract. Bronze does NOT enforce this; Silver will. Deliberately a
-# DIFFERENT schema from player_events: this is what proves the platform thesis.
-# The framework ingests columns it has never seen, with zero new ingestion code,
-# because Bronze is schema-on-read. DDIA Ch 4.
+
+# Declared contract. Bronze does not enforce it; Silver does. Deliberately a
+# different schema from player_events: the framework ingests columns it has
+# never seen with zero new code, because Bronze is schema-on-read.
 schema:
   - { name: purchase_id, type: long }
   - { name: player_id, type: long }
@@ -16,21 +15,15 @@ schema:
   - { name: currency, type: string }
   - { name: price_usd, type: double }
   - { name: purchase_timestamp, type: timestamp }
- 
-# Used in W5. Single producer, single clock: the deliberate CONTRAST to
-# player_events.
-#   identity_key: a purchase is unique by its id
-#   ordering_key: purchase_timestamp is a VALID order here because ONE producer
-#   means ONE clock, so wall-clock last-write-wins is legitimate. The moment you
-#   have N producers this breaks, which is exactly why player_events uses a
-#   sequence. DDIA Ch 8.
+
+# Single producer, single clock. purchase_timestamp is a valid ordering key
+# here because one producer means one clock; with N producers it would not be,
+# which is why player_events orders on a producer sequence instead.
 identity_key: [purchase_id]
 ordering_key: [purchase_timestamp]
-# No dedup_window_hours: purchases has no late-arrival defect and no seeded
-# duplicates, so there is nothing to bound. Absent = unbounded, a no-op here.
- 
-# Used in W4.
+# No dedup_window_hours: purchases carries no late arrivals or seeded
+# duplicates, so the window is unbounded.
+
 quality_rules:
-  - { column: purchase_id, rule: not_null }
-  - { column: price_usd, rule: not_null }
- 
+  - { name: purchase_id_not_null, type: row, column: purchase_id, check: not_null }
+  - { name: price_usd_not_null,   type: row, column: price_usd,   check: not_null }

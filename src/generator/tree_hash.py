@@ -2,6 +2,7 @@
 twice and compares this hash: same seed in, same bytes out. Contents are hashed
 and paths are sorted, so the result is order-independent and depends only on the
 bytes plus the deterministic, seed-driven path set."""
+
 import hashlib
 import sys
 from pathlib import Path
