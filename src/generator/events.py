@@ -247,7 +247,10 @@ flush = f"{small['flush_minutes']}min"
 events["event_day"] = events["event_timestamp"].dt.floor("D")
 events["flush_window"] = events["ingestion_timestamp"].dt.floor(flush)
 
-out = REPO_ROOT / "data" / "landing"
+# Each source owns its landing subtree (config/sources/player_events.yaml
+# declares landing_path: player_events). Clean only this source's subtree so a
+# rerun never deletes another source's landing data.
+out = REPO_ROOT / "data" / "landing" / "player_events"
 if out.exists():
     shutil.rmtree(out)  # clean stale runs so file counts stay verifiable
 

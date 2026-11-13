@@ -6,16 +6,18 @@ PYTHON ?= python
 install:
 	$(PYTHON) -m pip install -e ".[dev]"
 
+# Rebuild every source's landing subtree from its fixed seed.
 generate:
 	$(PYTHON) -m src.generator.events
+	$(PYTHON) -m src.generator.purchases
 
 # Bit-identical guarantee: generate twice in separate processes (fresh rng each
 # time), hash the whole output tree after each, fail if the two hashes differ.
 verify-repro:
 	@$(MAKE) --no-print-directory generate >/dev/null
-	@$(PYTHON) -m src.generator.tree_hash data > .repro_a
+	@$(PYTHON) -m src.generator.tree_hash data/landing > .repro_a
 	@$(MAKE) --no-print-directory generate >/dev/null
-	@$(PYTHON) -m src.generator.tree_hash data > .repro_b
+	@$(PYTHON) -m src.generator.tree_hash data/landing > .repro_b
 	@diff .repro_a .repro_b >/dev/null \
 		&& echo "REPRODUCIBLE: $$(cat .repro_a)" \
 		|| { echo "NOT REPRODUCIBLE"; diff .repro_a .repro_b; exit 1; }
