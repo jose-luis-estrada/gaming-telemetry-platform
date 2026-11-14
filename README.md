@@ -87,6 +87,8 @@ Requires Python 3.11 and Java 17.
 make install        # pip install -e ".[dev]"
 make generate       # build the dataset from config/manifest.json
 make verify-repro   # prove the same seed produces a bit-identical dataset
+make generate-dev   # 5M-row dev profile under data/dev (config/manifest.dev.json)
+make pipeline-dev   # same pipeline against the dev profile
 make pipeline       # ingest -> quality -> silver -> gold -> optimize
 make verify-late-data
 make test
@@ -96,6 +98,10 @@ make lint
 Data lives under `TELEMETRY_DATA_ROOT` (default `data/`, gitignored). The full
 dataset needs about 7.5 GB of peak memory to generate and a 6 GB Spark driver
 heap for Silver in local mode (`SPARK_DRIVER_MEMORY`).
+
+`TELEMETRY_MANIFEST` selects the dataset spec and `TELEMETRY_DATA_ROOT` where
+it lives; the `*-dev` targets set both, so a dev run never touches the full
+dataset.
 
 Or in Docker:
 
@@ -110,7 +116,7 @@ docker run --rm -it -p 4040:4040 -v "$PWD/data:/app/data" gaming-telemetry-platf
 |---|---|---|
 | Bronze rows | 50,500,000 (50M + 1% duplicates) | 50,500,000 |
 | Silver rows | 50M distinct + 5 out-of-window duplicates | 50,000,005 |
-| Drift key before drift day | 0 | 0 |
+| Old-schema events after drift cutover | 0 | 0 |
 | Hot game share | 0.37 +/- 0.02 | 0.3700 |
 | Late-arrival rate | 0.025 +/- 0.01 | 0.0250 |
 | Gold within horizon + past horizon | 50,000,005 | 49,583,401 + 416,604 |

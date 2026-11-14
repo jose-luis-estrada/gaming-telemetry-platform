@@ -1,7 +1,13 @@
 .PHONY: install generate verify-repro ingest quality silver gold optimize pipeline \
-	verify-late-data test lint format
+	verify-late-data test lint format generate_dev verify-repro-dev pipeline-dev
 
 PYTHON ?= python
+
+# Dataset profile and where it lands. Defaults reproduce the full reference
+# dataset under data/. Override per command or use the *-dev targets below.
+TELEMETRY_MANIFEST ?= config/manifest.json
+TELEMETRY_DATA_ROOT ?= data
+export TELEMETRY_MANIFEST TELEMETRY_DATA_ROOT
 
 install:
 	$(PYTHON) -m pip install -e ".[dev]"
@@ -15,9 +21,9 @@ generate:
 # time), hash the whole output tree after each, fail if the two hashes differ.
 verify-repro:
 	@$(MAKE) --no-print-directory generate >/dev/null
-	@$(PYTHON) -m src.generator.tree_hash data/landing > .repro_a
+	@$(PYTHON) -m src.generator.tree_hash $(TELEMETRY_DATA_ROOT)/landing > .repro_a
 	@$(MAKE) --no-print-directory generate >/dev/null
-	@$(PYTHON) -m src.generator.tree_hash data/landing > .repro_b
+	@$(PYTHON) -m src.generator.tree_hash $(TELEMETRY_DATA_ROOT)/landing > .repro_b
 	@diff .repro_a .repro_b >/dev/null \
 		&& echo "REPRODUCIBLE: $$(cat .repro_a)" \
 		|| { echo "NOT REPRODUCIBLE"; diff .repro_a .repro_b; exit 1; }
@@ -71,3 +77,16 @@ lint:
 format:
 	ruff format .
 	ruff check --fix .
+
+# Dev profile: 5M rows / 7 days under data/dev, isolated from the full dataset
+# (landing, checkpoints and every table layer all live under the dev root).
+DEV_VARS = TELEMETRY_MANIFEST=config/manifest.dev.json TELEMETRY_DATA_ROOT=data/dev
+
+generate-dev:
+	@$(MAKE) --no-print-directory generate $(DEV_VARS)
+
+verify-repro-dev:
+	@$(MAKE) --no-print-directory verify-repro $(DEV_VARS)
+
+pipeline-dev:
+	@$(MAKE) --no-print-directory pipeline $(DEV_VARS)
