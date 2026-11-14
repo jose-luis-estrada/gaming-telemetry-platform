@@ -37,17 +37,23 @@ quality_rules:
   - { name: event_id_not_null,        type: row, column: event_id,        check: not_null }
   - { name: event_timestamp_not_null, type: row, column: event_timestamp, check: not_null }
 
-  # --- aggregate rules: hard rules fail the run, soft rules report and pass ---
-  # hard: exact invariant. The drift key must not exist before drift_day.
-  # observed must be 0, not "close to 0", so this asserts and fails the run.
-  - name: schema_drift_before_boundary
+  # hard: exact invariant. Schema drift is a single clean cutover in event time:
+  # once the drift key first appears, no later event uses the old schema.
+  # Profile-independent on purpose: no hardcoded date, so the dev and full
+  # manifests share one contract. Where the cutover lands (drift_day) is the
+  # generator's spec and is tested there, not asserted at ingestion.
+  - name: schema_drift_clean_cutover
     type: aggregate
     severity: hard
     query: |
       SELECT COUNT(*) AS observed
       FROM bronze
-      WHERE event_date < '2026-01-15'
-        AND get_json_object(metadata, '$.network_type') IS NOT NULL
+      WHERE get_json_object(metadata, '$.network_type') IS NULL
+        AND event_timestamp >= (
+          SELECT MIN(event_timestamp)
+          FROM bronze
+          WHERE get_json_object(metadata, '$.network_type') IS NOT NULL
+        )
     assert: { op: eq, value: 0 }
 
   # soft: seeded skew. One game_id holds ~37% of events. Statistical, so report

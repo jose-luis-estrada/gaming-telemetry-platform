@@ -35,3 +35,19 @@ bad rows must stay inspectable.
   own slice, so history accumulates without duplication.
 - Verified at full scale: drift before boundary 0, hot game share 0.3700,
   late-arrival rate 0.0250, all matching the manifest.
+
+## Amendment (2026-11-13): drift rule is profile-independent
+
+The hard drift rule compared `event_date` against a hardcoded `2026-01-15`.
+That tied the source contract to one dataset profile: the dev profile (drift
+on day 3) failed the gate with 2,884,290 violations. The date was also one day
+early for the full profile, whose cutover is 2026-01-16.
+
+The rule now asserts the invariant itself: no old-schema event at or after the
+first drift-key event (`schema_drift_clean_cutover`). Where the cutover lands
+is the generator's specification, verified in
+`tests/unit/test_generator_profile.py`, not asserted at ingestion.
+
+Principle: a quality rule asserts invariants of the data. Parameters of a
+particular dataset belong in its manifest and the generator's tests.
+Re-verified at full scale: clean cutover violations 0.
