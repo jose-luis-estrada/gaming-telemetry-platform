@@ -34,6 +34,10 @@ REPO_ROOT = find_repo_root()
 # TELEMETRY_MANIFEST selects the manifest, relative to the repo root.
 # Defaults to the full-scale reference profile.
 MANIFEST_PATH = REPO_ROOT / os.environ.get("TELEMETRY_MANIFEST", "config/manifest.json")
+# TELEMETRY_DATA_ROOT selects where every layer lives (landing, bronze, ...).
+# Same variable LocalEnvironment reads, so generator and pipeline agree on paths.
+# Relative values resolve against the repo root; absolute values are used as is.
+DATA_ROOT = REPO_ROOT / os.environ.get("TELEMETRY_DATA_ROOT", "data")
 manifest = json.loads(MANIFEST_PATH.read_text())
 
 seed = manifest["seed"]
@@ -158,7 +162,7 @@ exc_code[crash_pos] = rng.integers(0, len(EXCEPTIONS), size=crash_pos.size)
 # Screenshot binaries: written once here, named by content hash (identical bytes
 # collapse to one file). The row keeps only an index into this small table, so
 # the null-heavy pointer columns never exist over all 50M rows.
-shots_dir = REPO_ROOT / "data" / "screenshots"
+shots_dir = DATA_ROOT / "screenshots"
 if shots_dir.exists():
     shutil.rmtree(shots_dir)
 shots_dir.mkdir(parents=True, exist_ok=True)
@@ -254,7 +258,7 @@ events["flush_window"] = events["ingestion_timestamp"].dt.floor(flush)
 # Each source owns its landing subtree (config/sources/player_events.yaml
 # declares landing_path: player_events). Clean only this source's subtree so a
 # rerun never deletes another source's landing data.
-out = REPO_ROOT / "data" / "landing" / "player_events"
+out = DATA_ROOT / "landing" / "player_events"
 if out.exists():
     shutil.rmtree(out)  # clean stale runs so file counts stay verifiable
 
@@ -367,7 +371,7 @@ print("files written:", n_files)
 # file, many references. That is the reference pattern.
 n_crash = int((events["exc_code"] >= 0).sum())
 n_shot_rows = int((events["shot_idx"] >= 0).sum())
-n_shot_files = len(list((REPO_ROOT / "data" / "screenshots").glob("*.png")))
+n_shot_files = len(list(shots_dir.glob("*.png")))
 print("total rows:", len(events))
 print("crash rows (stack_trace in-table):", n_crash)
 print("rows referencing a screenshot:", n_shot_rows)

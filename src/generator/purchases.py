@@ -13,6 +13,7 @@
 # event_date lives in the PATH, not in the file, so Spark partition discovery
 # recovers it on read and the hardcoded partitionBy("event_date") just works.
 
+import os
 from pathlib import Path
 
 import numpy as np
@@ -31,7 +32,10 @@ def find_repo_root(marker="config"):
 
 
 REPO_ROOT = find_repo_root()
-OUT = REPO_ROOT / "data" / "landing" / "purchases"
+# Same root as the events generator and LocalEnvironment (TELEMETRY_DATA_ROOT),
+# so a dev run lands next to dev player_events, never in the full landing.
+DATA_ROOT = REPO_ROOT / os.environ.get("TELEMETRY_DATA_ROOT", "data")
+OUT = DATA_ROOT / "landing" / "purchases"
 
 # Fixed seed: purchases is a standalone producer, not part of the manifest's
 # reproducibility guarantee, so it carries its own deterministic seed.
