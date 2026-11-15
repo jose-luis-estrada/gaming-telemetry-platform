@@ -1,5 +1,5 @@
 .PHONY: install generate verify-repro ingest quality silver gold optimize pipeline \
-	verify-late-data test lint format generate_dev verify-repro-dev pipeline-dev
+	verify-late-data test lint format generate-dev verify-repro-dev pipeline-dev
 
 PYTHON ?= python
 
@@ -8,6 +8,10 @@ PYTHON ?= python
 TELEMETRY_MANIFEST ?= config/manifest.json
 TELEMETRY_DATA_ROOT ?= data
 export TELEMETRY_MANIFEST TELEMETRY_DATA_ROOT
+
+# Everything the generators write: landing data plus the screenshot blobs that
+# crash rows point at. verify-repro hashes all of it, not just landing/.
+GENERATED = $(TELEMETRY_DATA_ROOT)/landing $(TELEMETRY_DATA_ROOT)/screenshots
 
 install:
 	$(PYTHON) -m pip install -e ".[dev]"
@@ -21,9 +25,9 @@ generate:
 # time), hash the whole output tree after each, fail if the two hashes differ.
 verify-repro:
 	@$(MAKE) --no-print-directory generate >/dev/null
-	@$(PYTHON) -m src.generator.tree_hash $(TELEMETRY_DATA_ROOT)/landing > .repro_a
+	@$(PYTHON) -m src.generator.tree_hash $(GENERATED) > .repro_a
 	@$(MAKE) --no-print-directory generate >/dev/null
-	@$(PYTHON) -m src.generator.tree_hash $(TELEMETRY_DATA_ROOT)/landing > .repro_b
+	@$(PYTHON) -m src.generator.tree_hash $(GENERATED) > .repro_b
 	@diff .repro_a .repro_b >/dev/null \
 		&& echo "REPRODUCIBLE: $$(cat .repro_a)" \
 		|| { echo "NOT REPRODUCIBLE"; diff .repro_a .repro_b; exit 1; }
