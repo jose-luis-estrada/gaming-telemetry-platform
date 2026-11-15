@@ -23,6 +23,8 @@ Notable changes to the platform. Design rationale lives in
 - Hard rule `schema_drift_before_boundary` replaced by
   `schema_drift_clean_cutover`: no old-schema event may follow the first
   drift-key event. No hardcoded date, so one contract serves every profile.
+- `tree_hash` accepts several roots and includes each root's name in path
+  identity, so reference hashes changed.
 
 ### Fixed
 - `purchases` quality rules were in an unsupported shape and never executed.
@@ -34,6 +36,11 @@ Notable changes to the platform. Design rationale lives in
   second profile deleted the full dataset's screenshots.
 - The drift rule's boundary (`2026-01-15`) was one day before the actual
   cutover (`drift_day` is an offset from 2026-01-01), leaving a day unchecked.
+- `verify-repro` hashed only `landing/`, so non-reproducible screenshots would
+  still pass. It now hashes every generator output listed in `GENERATED`.
+- `tree_hash` hashed a missing directory as empty, so a mistyped path passed as
+  REPRODUCIBLE. It now fails.
+- `.PHONY` listed `generate_dev` instead of `generate-dev`.
 
 ### Added
 - Quality gate entrypoint writing a quarantine table per source.
@@ -44,6 +51,7 @@ Notable changes to the platform. Design rationale lives in
   day 3), selected with `TELEMETRY_MANIFEST`. `make generate-dev`,
   `verify-repro-dev` and `pipeline-dev` run it under `data/dev`.
 - Generator test covering data-root isolation and the drift cutover day.
+- Unit tests for `tree_hash`.
 
 ## [0.1.0] - 2026-10-06 (`v1-databricks`)
 
