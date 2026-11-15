@@ -8,15 +8,23 @@ import sys
 from pathlib import Path
 
 
-def tree_hash(root: Path) -> str:
+def tree_hash(roots: list[Path]) -> str:
     h = hashlib.sha256()
-    # Sort by path so filesystem iteration order can never change the result.
-    for f in sorted(p for p in root.rglob("*") if p.is_file()):
-        h.update(f.relative_to(root).as_posix().encode())  # path identity
-        h.update(hashlib.sha256(f.read_bytes()).digest())  # content identity
+    # Sort roots and files so neither argument order nor filesystem iteration
+    # order can change the result.
+    for root in sorted(roots):
+        if not root.is_dir():
+            # A missing root hashes as empty, so both runs would match and a
+            # typo would silently pass as REPRODUCIBLE.
+            raise FileNotFoundError(f"not a directory: {root}")
+        for f in sorted(p for p in root.rglob("*") if p.is_file()):
+            # Path identity includes the root's own name, so moving a file
+            # from landing/ to screenshots/ changes the hash.
+            h.update(f.relative_to(root.parent).as_posix().encode())
+            h.update(hashlib.sha256(f.read_bytes()).digest())  # content identity
     return h.hexdigest()
 
 
 if __name__ == "__main__":
-    root = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("data")
-    print(tree_hash(root))
+    roots = [Path(arg) for arg in sys.argv[1:]] or [Path("data")]
+    print(tree_hash(roots))
