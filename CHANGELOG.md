@@ -25,6 +25,11 @@ Notable changes to the platform. Design rationale lives in
   drift-key event. No hardcoded date, so one contract serves every profile.
 - `tree_hash` accepts several roots and includes each root's name in path
   identity, so reference hashes changed.
+- `purchases` generator reads its dates from the manifest's `event_window`
+  instead of fixed 2026-01-14..16 (a leftover of the retired Databricks
+  Volume subset), so its partitions always match `player_events`. Seed and
+  per-day volume stay local. Full profile now lands 30 days (1.5M rows), so
+  reference hashes changed.
 
 ### Fixed
 - `purchases` quality rules were in an unsupported shape and never executed.
