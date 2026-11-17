@@ -1,7 +1,8 @@
-"""Generator honors TELEMETRY_MANIFEST and TELEMETRY_DATA_ROOT.
+"""Generators honor TELEMETRY_MANIFEST and TELEMETRY_DATA_ROOT.
 
-Runs the real generator in a subprocess (it is a module-level script, not a
-function) against a tiny copy of the dev manifest, writing under tmp_path.
+Runs both real generators (events, purchases) in subprocesses (they are
+module-level scripts, not functions) against a tiny copy of the dev manifest,
+writing under tmp_path.
 """
 
 import json
@@ -36,13 +37,16 @@ def generated(tmp_path_factory):
         "TELEMETRY_MANIFEST": str(manifest_path),
         "TELEMETRY_DATA_ROOT": str(data_root),
     }
-    subprocess.run(
-        [sys.executable, "-m", "src.generator.events"],
-        cwd=REPO_ROOT,
-        env=env,
-        check=True,
-        capture_output=True,
-    )
+    # Both generators, same env: proves one TELEMETRY_MANIFEST drives both
+    # sources. purchases keeps its own volume (7 x 50k rows here), still fast.
+    for module in ("src.generator.events", "src.generator.purchases"):
+        subprocess.run(
+            [sys.executable, "-m", module],
+            cwd=REPO_ROOT,
+            env=env,
+            check=True,
+            capture_output=True,
+        )
     return manifest, data_root
 
 
@@ -72,3 +76,24 @@ def test_drift_cutover_lands_on_drift_day(generated):
 
     assert df.loc[has_key, "event_timestamp"].min() >= cutover
     assert df.loc[~has_key, "event_timestamp"].max() < cutover
+
+
+def _partitions(landing):
+    return sorted(p.name for p in landing.iterdir() if p.name.startswith("event_date="))
+
+
+def test_purchases_follow_event_window(generated):
+    # Same partitions as player_events: Gold joins revenue to events by date,
+    # so a source on its own calendar would silently produce empty joins.
+    _, data_root = generated
+    landing = data_root / "landing"
+    assert _partitions(landing / "purchases") == _partitions(landing / "player_events")
+
+
+def test_purchase_timestamps_match_their_partition(generated):
+    # The path says which day a row belongs to; the timestamp must agree, or
+    # partition pruning would return the wrong rows.
+    _, data_root = generated
+    df = pd.read_parquet(data_root / "landing" / "purchases")
+    ts_date = df["purchase_timestamp"].dt.strftime("%Y-%m-%d")
+    assert (ts_date == df["event_date"].astype(str)).all()

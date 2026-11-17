@@ -13,6 +13,7 @@
 # event_date lives in the PATH, not in the file, so Spark partition discovery
 # recovers it on read and the hardcoded partitionBy("event_date") just works.
 
+import json
 import os
 from pathlib import Path
 
@@ -32,19 +33,26 @@ def find_repo_root(marker="config"):
 
 
 REPO_ROOT = find_repo_root()
+# Same selector as the events generator: TELEMETRY_MANIFEST picks the profile,
+# so one env var drives both sources and their dates always line up.
+MANIFEST_PATH = REPO_ROOT / os.environ.get("TELEMETRY_MANIFEST", "config/manifest.json")
+manifest = json.loads(MANIFEST_PATH.read_text())
+window = manifest["event_window"]
 # Same root as the events generator and LocalEnvironment (TELEMETRY_DATA_ROOT),
 # so a dev run lands next to dev player_events, never in the full landing.
 DATA_ROOT = REPO_ROOT / os.environ.get("TELEMETRY_DATA_ROOT", "data")
 OUT = DATA_ROOT / "landing" / "purchases"
 
-# Fixed seed: purchases is a standalone producer, not part of the manifest's
-# reproducibility guarantee, so it carries its own deterministic seed.
+# Own seed on purpose: the manifest decides the dates, but changing its seed
+# must not reshuffle purchases. Still covered by verify-repro (lives in landing/).
 rng = np.random.default_rng(7)
 
-# Three dates that also exist in the cloud Volume subset (14/15/16), so if this
-# source is later mirrored to the Volume the dates line up. Small on purpose:
-# the goal is proving onboarding, not scale, which player_events already owns.
-DATES = ["2026-01-14", "2026-01-15", "2026-01-16"]
+# Purchases follows the manifest's event window so Gold can line revenue up
+# against player_events by date. Seed and volume stay local: the manifest owns
+# WHEN, this producer owns WHAT. Fixed dates (14-16) dated from the retired
+# Databricks Volume subset (ADR-0013) and no longer apply.
+start = pd.Timestamp(window["start_utc"])
+DATES = pd.date_range(start, periods=window["days"], freq="D").strftime("%Y-%m-%d").tolist()
 ROWS_PER_DATE = 50_000
 
 ITEM_CATEGORIES = np.array(["skin", "currency_pack", "battle_pass", "dlc", "loot_box"])
